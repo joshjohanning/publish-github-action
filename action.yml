@@ -3,7 +3,7 @@ description: 'Publish your GitHub Action with ncc'
 author: 'joshjohanning'
 branding:
   icon: 'package'
-  color: 'green'
+  color: 'black'
 inputs:
   github_token:
     description: 'Token for the github API'
