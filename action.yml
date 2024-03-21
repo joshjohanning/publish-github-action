@@ -8,6 +8,22 @@ inputs:
   github_token:
     description: 'Token for the github API'
     required: true
+  npm_package_command:
+    description: 'Command to build the action'
+    default: 'npm run package'
+    required: false
+  commit_node_modules:
+    description: 'Change to true to commit node_modules folder'
+    default: 'false'
+    required: false
+  publish_minor_version:
+    description: 'Change to true to publish minor version'
+    default: 'false'
+    required: false
+  publish_release_branch:
+    description: 'Change to true to publish release branch'
+    default: 'false'
+    required: false
 runs:
   using: 'node20'
   main: 'lib/main.js'

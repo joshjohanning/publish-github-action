@@ -6,6 +6,10 @@ const { retry } = require("@octokit/plugin-retry");
 const fs = require('fs');
 const semver = require('semver');
 const githubToken = core.getInput('github_token', { required: true });
+const npmPackageCommand = core.getInput('npm_package_command', { required: false });
+const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
+const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 const context = Github.context;
 const MyOctokit = Octokit.plugin(retry)
 const octokit = new MyOctokit({
@@ -36,15 +40,26 @@ async function run() {
     await exec.exec('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
     await exec.exec('git config --global user.name "github-actions[bot]"');
     await exec.exec('git remote set-url origin https://x-access-token:'+githubToken+'@github.com/'+context.repo.owner+'/'+context.repo.repo+'.git');
-    await exec.exec('git add -f node_modules');
+    if (npmPackageCommand) {
+      await exec.exec(npmPackageCommand);
+      await exec.exec('git add .');
+    }
+
+    if (commitNodeModules === 'true') {
+        await exec.exec('git add -f node_modules');
+    }
     await exec.exec('git rm -r .github');
     await exec.exec('git commit -a -m "prod dependencies"');
-    await exec.exec('git', ['push', 'origin', branchName]);
+    if (publishReleaseVersion === 'true') {
+      await exec.exec('git', ['push', 'origin', branchName]);
+    }
 
     await exec.exec('git', ['push', 'origin', ':refs/tags/'+version]);
     await exec.exec('git', ['tag', '-fa', version, '-m', version]);
-    await exec.exec('git', ['push', 'origin', ':refs/tags/'+minorVersion]);
-    await exec.exec('git', ['tag', '-f', minorVersion]);
+    if (publishMinorVersion === 'true') {
+      await exec.exec('git', ['push', 'origin', ':refs/tags/'+minorVersion]);
+      await exec.exec('git', ['tag', '-f', minorVersion]);
+    }
     await exec.exec('git', ['push', 'origin', ':refs/tags/'+majorVersion]);
     await exec.exec('git', ['tag', '-f', majorVersion]);
     await exec.exec('git push --tags origin')
@@ -52,7 +67,7 @@ async function run() {
     await octokit.repos.createRelease({owner: context.repo.owner, repo: context.repo.repo, tag_name: version, name: version});
 
   } catch (error) {
-    core.setFailed(error.message);
+    core.setFailed((error as Error).message);
   }
 }
 
