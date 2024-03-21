@@ -1,9 +1,9 @@
-name: 'Publish GitHub Action'
-description: 'Publish your GitHub Action'
-author: 'tgymnich'
+name: 'Publish GitHub Action with ncc'
+description: 'Publish your GitHub Action with ncc'
+author: 'joshjohanning'
 branding:
-  icon: 'truck'
-  color: 'blue'
+  icon: 'package'
+  color: 'green'
 inputs:
   github_token:
     description: 'Token for the github API'
