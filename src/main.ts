@@ -27,6 +27,12 @@ async function run() {
     let minorVersion = 'v'+semver.major(json.version)+'.'+semver.minor(json.version);
     let majorVersion = 'v'+semver.major(json.version);
     let branchName: string = 'releases/'+version;
+    let installCommand = "npm install --production";
+    if (fs.existsSync("pnpm-lock.yaml")) {
+      installCommand = "pnpm install --prod";
+    } else if (fs.existsSync("yarn.lock")) {
+      installCommand = "yarn install --production";
+    }
 
     let tags = await octokit.repos.listTags({owner: context.repo.owner, repo: context.repo.repo});
 
@@ -36,7 +42,7 @@ async function run() {
     }
 
     await exec.exec('git', ['checkout', '-b', branchName]);
-    await exec.exec('npm install --production');
+    await exec.exec(installCommand);
     await exec.exec('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
     await exec.exec('git config --global user.name "github-actions[bot]"');
     await exec.exec('git remote set-url origin https://x-access-token:'+githubToken+'@github.com/'+context.repo.owner+'/'+context.repo.repo+'.git');
