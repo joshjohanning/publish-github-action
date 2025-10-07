@@ -5,8 +5,8 @@
   "description": "Publish your GitHub Action",
   "main": "lib/main.js",
   "scripts": {
-    "build": "tsc",
-    "package": "npm run build && ncc build lib/main.js -o dist",
+    "build": "npx tsc",
+    "package": "npm run build && npx @vercel/ncc build lib/main.js -o dist",
     "test": "echo \"Error: no test specified\" && exit 0"
   },
   "repository": {
