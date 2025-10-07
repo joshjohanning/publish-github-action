@@ -3,6 +3,9 @@ __tests__/runner/*
 # comment out in distribution branches
 node_modules/
 
+# TypeScript build output (we use dist/ from ncc bundler instead)
+lib/
+
 # Rest pulled from https://github.com/github/gitignore/blob/master/Node.gitignore
 # Logs
 logs
