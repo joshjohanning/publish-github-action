@@ -65,14 +65,19 @@ async function run() {
     await exec.exec('git push --tags origin')
 
     // Find the previous semver release to use as baseline for release notes
+    const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
     let previousTag: string | undefined;
     try {
-      const releases = await octokit.repos.listReleases({owner: context.repo.owner, repo: context.repo.repo});
+      const releases = await octokit.repos.listReleases({
+        owner: context.repo.owner, 
+        repo: context.repo.repo,
+        per_page: 100
+      });
       if (releases.data.length > 0) {
         // Find the most recent release with a semver tag (vX.Y.Z pattern)
         const semverRelease = releases.data.find(release => {
           const tagName = release.tag_name;
-          return tagName && /^v\d+\.\d+\.\d+$/.test(tagName);
+          return tagName && SEMVER_TAG_PATTERN.test(tagName);
         });
         if (semverRelease) {
           previousTag = semverRelease.tag_name;
