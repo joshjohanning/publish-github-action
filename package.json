@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Publish your GitHub Action",
   "main": "lib/main.js",
@@ -10,14 +10,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tgymnich/publish-github-action.git"
+    "url": "git+https://github.com/joshjohanning/publish-github-action.git"
   },
   "keywords": [
     "actions",
     "node",
     "publish"
   ],
-  "author": "tgymnich",
+  "author": "joshjohanning",
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.2.7",
