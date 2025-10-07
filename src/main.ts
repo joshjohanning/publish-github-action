@@ -64,7 +64,50 @@ async function run() {
     await exec.exec('git', ['tag', '-f', majorVersion]);
     await exec.exec('git push --tags origin')
 
-    await octokit.repos.createRelease({owner: context.repo.owner, repo: context.repo.repo, tag_name: version, name: version});
+    // Find the previous semver release to use as baseline for release notes
+    let previousTag: string | undefined;
+    try {
+      const releases = await octokit.repos.listReleases({owner: context.repo.owner, repo: context.repo.repo});
+      if (releases.data.length > 0) {
+        // Find the most recent release with a semver tag (vX.Y.Z pattern)
+        const semverRelease = releases.data.find(release => {
+          const tagName = release.tag_name;
+          return tagName && /^v\d+\.\d+\.\d+$/.test(tagName);
+        });
+        if (semverRelease) {
+          previousTag = semverRelease.tag_name;
+        }
+      }
+    } catch (error) {
+      console.log('Could not fetch previous releases:', (error as Error).message);
+    }
+
+    // Generate release notes
+    let releaseNotes = '';
+    if (previousTag) {
+      try {
+        const generatedNotes = await octokit.repos.generateReleaseNotes({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          tag_name: version,
+          previous_tag_name: previousTag
+        });
+        releaseNotes = generatedNotes.data.body;
+        console.log('Generated release notes from', previousTag, 'to', version);
+      } catch (error) {
+        console.log('Could not generate release notes:', (error as Error).message);
+      }
+    } else {
+      console.log('No previous semver release found, creating release without generated notes');
+    }
+
+    await octokit.repos.createRelease({
+      owner: context.repo.owner, 
+      repo: context.repo.repo, 
+      tag_name: version, 
+      name: version,
+      body: releaseNotes
+    });
 
   } catch (error) {
     core.setFailed((error as Error).message);
