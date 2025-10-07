@@ -12,10 +12,11 @@ jobs:
     steps:
     - uses: actions/checkout@v5
     - run: npm ci
+    - run: npm run build
     - uses: ./
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
-        npm_package_command: npm run build
+        npm_package_command: npm run package
         commit_node_modules: false
         publish_minor_version: false
         publish_release_branch: false
