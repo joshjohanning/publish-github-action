@@ -19,10 +19,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: install ncc
       run: npm i -g @vercel/ncc
-    - uses: joshjohanning/publish-github-action@v1.4.0
+    - uses: joshjohanning/publish-github-action@v1
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         npm_package_command: npm run package
