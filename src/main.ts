@@ -1,8 +1,6 @@
 import * as core from '@actions/core';
 import * as exec from '@actions/exec';
-const Github = require('@actions/github');
-const { Octokit } = require("@octokit/rest");
-const { retry } = require("@octokit/plugin-retry");
+import * as github from '@actions/github';
 const fs = require('fs');
 const semver = require('semver');
 const githubToken = core.getInput('github_token', { required: true });
@@ -10,15 +8,8 @@ const npmPackageCommand = core.getInput('npm_package_command', { required: false
 const commitNodeModules = core.getInput('commit_node_modules', { required: false });
 const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
 const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
-const context = Github.context;
-const MyOctokit = Octokit.plugin(retry)
-const octokit = new MyOctokit({
-  auth: githubToken,
-  request: {
-    retries: 4,
-    retryAfter: 60,
-  },
-});
+const context = github.context;
+const octokit = github.getOctokit(githubToken);
 
 async function run() {
   try {
@@ -91,7 +82,7 @@ async function run() {
     let releaseNotes = '';
     if (previousTag) {
       try {
-        const generatedNotes = await octokit.repos.generateReleaseNotes({
+        const generatedNotes = await octokit.request('POST /repos/{owner}/{repo}/releases/generate-notes', {
           owner: context.repo.owner,
           repo: context.repo.repo,
           tag_name: version,
