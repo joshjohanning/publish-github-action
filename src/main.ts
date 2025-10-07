@@ -19,7 +19,7 @@ async function run() {
     let majorVersion = 'v'+semver.major(json.version);
     let branchName: string = 'releases/'+version;
 
-    let tags = await octokit.repos.listTags({owner: context.repo.owner, repo: context.repo.repo});
+    let tags = await octokit.rest.repos.listTags({owner: context.repo.owner, repo: context.repo.repo});
 
     if (tags.data.some(tag => tag.name === version)) {
       console.log('Tag', version, 'already exists');
@@ -59,7 +59,7 @@ async function run() {
     const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
     let previousTag: string | undefined;
     try {
-      const releases = await octokit.repos.listReleases({
+      const releases = await octokit.rest.repos.listReleases({
         owner: context.repo.owner, 
         repo: context.repo.repo,
         per_page: 100
@@ -97,7 +97,7 @@ async function run() {
       console.log('No previous semver release found, creating release without generated notes');
     }
 
-    await octokit.repos.createRelease({
+    await octokit.rest.repos.createRelease({
       owner: context.repo.owner, 
       repo: context.repo.repo, 
       tag_name: version, 
