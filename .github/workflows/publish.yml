@@ -11,6 +11,11 @@ jobs:
       contents: write
     steps:
     - uses: actions/checkout@v5
-    - uses: tgymnich/publish-github-action@v1
+    - run: npm ci
+    - uses: ./
       with:
         github_token: ${{ secrets.GITHUB_TOKEN }}
+        npm_package_command: npm run build
+        commit_node_modules: false
+        publish_minor_version: false
+        publish_release_branch: false
