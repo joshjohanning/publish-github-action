@@ -16,6 +16,10 @@ inputs:
     description: 'Change to true to commit node_modules folder'
     default: 'false'
     required: false
+  commit_dist_folder:
+    description: 'Change to true to commit dist folder'
+    default: 'true'
+    required: false
   publish_minor_version:
     description: 'Change to true to publish minor version'
     default: 'false'

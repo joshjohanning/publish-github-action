@@ -6,6 +6,7 @@ const semver = require('semver');
 const githubToken = core.getInput('github_token', { required: true });
 const npmPackageCommand = core.getInput('npm_package_command', { required: false });
 const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
 const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
 const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 const context = github.context;
@@ -39,6 +40,11 @@ async function run() {
     if (commitNodeModules === 'true') {
         await exec.exec('git add -f node_modules');
     }
+
+    if (commitDistFolder === 'true') {
+        await exec.exec('git add -f dist');
+    }
+
     await exec.exec('git rm -r .github');
     await exec.exec('git commit -a -m "prod dependencies"');
     if (publishReleaseVersion === 'true') {

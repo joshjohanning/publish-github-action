@@ -57,6 +57,7 @@ const semver = __nccwpck_require__(2088);
 const githubToken = core.getInput('github_token', { required: true });
 const npmPackageCommand = core.getInput('npm_package_command', { required: false });
 const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
 const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
 const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 const context = github.context;
@@ -85,6 +86,9 @@ function run() {
             }
             if (commitNodeModules === 'true') {
                 yield exec.exec('git add -f node_modules');
+            }
+            if (commitDistFolder === 'true') {
+                yield exec.exec('git add -f dist');
             }
             yield exec.exec('git rm -r .github');
             yield exec.exec('git commit -a -m "prod dependencies"');
