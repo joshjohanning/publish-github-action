@@ -1,5 +1,6 @@
 # Publish GitHub Action
 
+[![CI](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml/badge.svg)](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml)
 [![Publish GitHub Action](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml/badge.svg?branch=main&event=push)](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml)
 
 This action creates a release branch for your GitHub Actions which will be automatically tagged and released. The release version can be  defined in `package.json`.

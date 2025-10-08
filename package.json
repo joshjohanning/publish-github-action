@@ -1,13 +1,14 @@
 {
   "name": "publish-github-action",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "private": true,
   "description": "Publish your GitHub Action",
   "main": "lib/main.js",
   "scripts": {
     "build": "npx tsc",
     "package": "npm run build && npx @vercel/ncc build lib/main.js -o dist",
-    "test": "echo \"Error: no test specified\" && exit 0"
+    "test": "echo \"Error: no test specified\" && exit 0",
+    "all": "npm run build && npm run test && npm run package"
   },
   "repository": {
     "type": "git",

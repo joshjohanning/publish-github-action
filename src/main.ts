@@ -80,21 +80,26 @@ async function run() {
 
     // Generate release notes
     let releaseNotes = '';
-    if (previousTag) {
-      try {
-        const generatedNotes = await octokit.request('POST /repos/{owner}/{repo}/releases/generate-notes', {
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          tag_name: version,
-          previous_tag_name: previousTag
-        });
-        releaseNotes = generatedNotes.data.body;
-        console.log('Generated release notes from', previousTag, 'to', version);
-      } catch (error) {
-        console.log('Could not generate release notes:', (error as Error).message);
+    try {
+      const requestData: any = {
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        tag_name: version
+      };
+      
+      // Only add previous_tag_name if we found one
+      if (previousTag) {
+        requestData.previous_tag_name = previousTag;
+        console.log('Generating release notes from', previousTag, 'to', version);
+      } else {
+        console.log('Generating release notes for first release', version);
       }
-    } else {
-      console.log('No previous semver release found, creating release without generated notes');
+
+      const generatedNotes = await octokit.request('POST /repos/{owner}/{repo}/releases/generate-notes', requestData);
+      releaseNotes = generatedNotes.data.body;
+      console.log('Successfully generated release notes');
+    } catch (error) {
+      console.log('Could not generate release notes:', (error as Error).message);
     }
 
     await octokit.rest.repos.createRelease({
