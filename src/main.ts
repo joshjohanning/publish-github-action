@@ -44,7 +44,7 @@ async function run() {
     if (commitDistFolder === 'true') {
         await exec.exec('git add -f dist');
     }
-    
+
     await exec.exec('git rm -r .github');
     await exec.exec('git commit -a -m "prod dependencies"');
     if (publishReleaseVersion === 'true') {
