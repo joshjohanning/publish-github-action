@@ -29,17 +29,14 @@ jobs:
       - name: Check npm version compatibility
         uses: joshjohanning/npm-version-check-action@v1
 
-      # TODO: Enable linting when rules are added
-      # - name: Run linting
-      #   run: npm run lint
+      - name: Run linting
+        run: npm run lint
 
-      # TODO: Enable formatting when rules are added
-      # - name: Run formatting check
-      #   run: npm run format:check
+      - name: Run formatting check
+        run: npm run format:check
 
-      # TODO: Enable when tests are added
-      # - name: Run tests
-      #   run: npm test
+      - name: Run tests
+        run: npm test
 
       - name: Package the action
         run: npm run package
