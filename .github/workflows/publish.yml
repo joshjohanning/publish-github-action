@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: npm ci
-      - uses: joshjohanning/publish-github-action@v1
+      - uses: joshjohanning/publish-github-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
