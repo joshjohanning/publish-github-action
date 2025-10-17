@@ -45,7 +45,13 @@ export async function run() {
     await exec.exec('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
     await exec.exec('git config --global user.name "github-actions[bot]"');
     await exec.exec(
-      `git remote set-url origin https://x-access-token:${githubToken}@github.com/${context.repo.owner}/${context.repo.repo}.git`
+      'git',
+      [
+        'remote',
+        'set-url',
+        'origin',
+        `https://x-access-token:${githubToken}@github.com/${context.repo.owner}/${context.repo.repo}.git`
+      ]
     );
 
     if (npmPackageCommand) {
