@@ -10,26 +10,16 @@ import { readFileSync } from 'fs';
 import * as semver from 'semver';
 
 /**
- * Get input value
- * @param {string} name - Input name
- * @param {Object} options - Input options
- * @returns {string} Input value
- */
-function getInput(name, options = {}) {
-  return core.getInput(name, options);
-}
-
-/**
  * Main action logic
  */
 export async function run() {
   try {
-    const githubToken = getInput('github_token', { required: true });
-    const npmPackageCommand = getInput('npm_package_command', { required: false });
-    const commitNodeModules = getInput('commit_node_modules', { required: false });
-    const commitDistFolder = getInput('commit_dist_folder', { required: false });
-    const publishMinorVersion = getInput('publish_minor_version', { required: false });
-    const publishReleaseVersion = getInput('publish_release_branch', { required: false });
+    const githubToken = core.getInput('github_token', { required: true });
+    const npmPackageCommand = core.getInput('npm_package_command', { required: false });
+    const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+    const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
+    const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
+    const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 
     const context = github.context;
     const octokit = github.getOctokit(githubToken);
