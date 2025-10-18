@@ -135,6 +135,7 @@ async function getFilesRecursively(dir) {
 export async function run() {
   try {
     const githubToken = core.getInput('github_token', { required: true });
+    const githubApiUrl = core.getInput('github_api_url', { required: false });
     const npmPackageCommand = core.getInput('npm_package_command', { required: false });
     const commitNodeModules = core.getInput('commit_node_modules', { required: false });
     const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
@@ -142,7 +143,7 @@ export async function run() {
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 
     const context = github.context;
-    const octokit = github.getOctokit(githubToken);
+    const octokit = github.getOctokit(githubToken, { baseUrl: githubApiUrl });
 
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;

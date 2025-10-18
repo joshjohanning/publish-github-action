@@ -532,9 +532,55 @@ describe('Publish GitHub Action', () => {
     });
   });
 
-      
-      // Should still create tags
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalled();
+  describe('GHES support', () => {
+    test('should use custom API URL for GHES', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://ghes.example.com/api/v3',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      // Should create octokit with custom baseUrl
+      expect(mockGithub.getOctokit).toHaveBeenCalledWith('test-token', { baseUrl: 'https://ghes.example.com/api/v3' });
+    });
+
+    test('should use ghe.com API URL format', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://api.octocorp.ghe.com',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      // Should create octokit with ghe.com baseUrl
+      expect(mockGithub.getOctokit).toHaveBeenCalledWith('test-token', { baseUrl: 'https://api.octocorp.ghe.com' });
     });
   });
 });
