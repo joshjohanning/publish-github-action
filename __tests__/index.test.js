@@ -53,7 +53,8 @@ const mockOctokit = {
 const mockFs = {
   readFileSync: jest.fn(),
   readdirSync: jest.fn(),
-  statSync: jest.fn()
+  statSync: jest.fn(),
+  rmSync: jest.fn()
 };
 
 // Mock semver module
@@ -69,7 +70,8 @@ jest.unstable_mockModule('@actions/github', () => mockGithub);
 jest.unstable_mockModule('fs', () => ({
   readFileSync: mockFs.readFileSync,
   readdirSync: mockFs.readdirSync,
-  statSync: mockFs.statSync
+  statSync: mockFs.statSync,
+  rmSync: mockFs.rmSync
 }));
 jest.unstable_mockModule('semver', () => ({
   major: mockSemver.major,
