@@ -175,8 +175,6 @@ describe('Publish GitHub Action', () => {
         return inputs[name] || '';
       });
 
-      await run();
-
       // Mock git rev-parse output for getting commit SHA
       const execImplementation = (cmd, args, options) => {
         if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === 'HEAD') {
@@ -187,6 +185,8 @@ describe('Publish GitHub Action', () => {
         return Promise.resolve(0);
       };
       mockExec.exec.mockImplementation(execImplementation);
+
+      await run();
 
       expect(mockExec.exec).toHaveBeenCalledWith('git add -f node_modules');
     });
