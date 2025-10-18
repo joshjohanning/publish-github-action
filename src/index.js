@@ -41,8 +41,52 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
     // 3. Build tree with changed files
     const treeItems = [];
 
-    // Add dist folder if enabled
+    // Get the tree from the parent commit to identify files to delete
+    let existingTree;
+    try {
+      const { data: tree } = await octokit.rest.git.getTree({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        tree_sha: commit.tree.sha,
+        recursive: 'true'
+      });
+      existingTree = tree.tree;
+    } catch (error) {
+      core.info(`Could not fetch existing tree: ${error.message}`);
+      existingTree = [];
+    }
+
+    // Always remove .github folder from release commits
+    const githubFiles = existingTree.filter(item => item.path.startsWith('.github/'));
+    for (const file of githubFiles) {
+      treeItems.push({
+        path: file.path,
+        mode: file.mode,
+        type: 'blob',
+        sha: null // null sha marks file for deletion
+      });
+    }
+    if (githubFiles.length > 0) {
+      core.info(`Marked ${githubFiles.length} .github files for deletion`);
+    }
+
+    // If committing dist folder, first delete any existing dist files then add new ones
     if (commitDistFolder === 'true') {
+      // Mark all existing dist/ files for deletion to handle renames/removals
+      const existingDistFiles = existingTree.filter(item => item.path.startsWith('dist/'));
+      for (const file of existingDistFiles) {
+        treeItems.push({
+          path: file.path,
+          mode: file.mode,
+          type: 'blob',
+          sha: null // null sha marks file for deletion
+        });
+      }
+      if (existingDistFiles.length > 0) {
+        core.info(`Marked ${existingDistFiles.length} existing dist files for deletion`);
+      }
+
+      // Now add the new dist files
       const distFiles = await getFilesRecursively('dist');
       for (const file of distFiles) {
         const content = readFileSync(file.path, 'utf8');
