@@ -208,6 +208,10 @@ export async function run() {
       await exec.exec('git', ['push', 'origin', branchName]);
 
       commitSha = await createCommitViaAPI(octokit, context, branchName, version, commitDistFolder);
+
+      // Fetch the commit created via API so local git knows about it
+      await exec.exec('git', ['fetch', 'origin', branchName]);
+      core.info('Fetched API-created commit to local repository');
     }
 
     core.info(`Commit SHA for tagging: ${commitSha}`);
