@@ -10,6 +10,126 @@ import { readFileSync } from 'fs';
 import * as semver from 'semver';
 
 /**
+ * Create a commit using GitHub API for verified commits
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {string} branchName - Name of the branch to commit to
+ * @param {string} version - Version being released
+ * @param {string} commitDistFolder - Whether to commit dist folder
+ * @param {string} publishReleaseVersion - Whether to publish the release branch
+ * @returns {string} The SHA of the new commit
+ */
+async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder, publishReleaseVersion) {
+  try {
+    core.info('Creating verified commit via GitHub API...');
+
+    // 1. Get current branch reference
+    const { data: ref } = await octokit.rest.git.getRef({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      ref: `heads/${branchName}`
+    });
+    core.info(`Current branch SHA: ${ref.object.sha}`);
+
+    // 2. Get current commit
+    const { data: commit } = await octokit.rest.git.getCommit({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      commit_sha: ref.object.sha
+    });
+    core.info(`Current commit tree SHA: ${commit.tree.sha}`);
+
+    // 3. Build tree with changed files
+    const treeItems = [];
+
+    // Add dist folder if enabled
+    if (commitDistFolder === 'true') {
+      const distFiles = await getFilesRecursively('dist');
+      for (const file of distFiles) {
+        const content = readFileSync(file.path, 'utf8');
+        treeItems.push({
+          path: file.path,
+          mode: '100644',
+          type: 'blob',
+          content: content
+        });
+      }
+      core.info(`Added ${distFiles.length} files from dist folder`);
+    }
+
+    // Remove .github folder by not including it in the tree
+    core.info('Excluding .github folder from tree');
+
+    // 4. Create new tree
+    const { data: newTree } = await octokit.rest.git.createTree({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      base_tree: commit.tree.sha,
+      tree: treeItems
+    });
+    core.info(`Created new tree: ${newTree.sha}`);
+
+    // 5. Create new commit (automatically signed by GitHub)
+    const { data: newCommit } = await octokit.rest.git.createCommit({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      message: `chore: prepare ${version} release`,
+      tree: newTree.sha,
+      parents: [commit.sha]
+    });
+    core.info(`Created new verified commit: ${newCommit.sha}`);
+
+    // 6. Update branch reference only if we want to keep the release branch
+    if (publishReleaseVersion === 'true') {
+      await octokit.rest.git.updateRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `heads/${branchName}`,
+        sha: newCommit.sha
+      });
+      core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
+    } else {
+      core.info(`Skipping branch update - commit will be accessible via tags only`);
+    }
+
+    return newCommit.sha;
+  } catch (error) {
+    core.error(`Failed to create commit via API: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Recursively get all files in a directory
+ * @param {string} dir - Directory to scan
+ * @returns {Array} Array of file objects with path
+ */
+async function getFilesRecursively(dir) {
+  const { readdirSync, statSync } = await import('fs');
+  const { join } = await import('path');
+
+  const files = [];
+
+  function scan(currentDir) {
+    const items = readdirSync(currentDir);
+
+    for (const item of items) {
+      const fullPath = join(currentDir, item);
+      const stat = statSync(fullPath);
+
+      if (stat.isDirectory()) {
+        scan(fullPath);
+      } else {
+        files.push({ path: fullPath });
+      }
+    }
+  }
+
+  scan(dir);
+  return files;
+}
+
+/**
  * Main action logic
  */
 export async function run() {
@@ -65,23 +185,137 @@ export async function run() {
     }
 
     await exec.exec('git rm -r .github');
-    await exec.exec('git', ['commit', '-a', '-m', `chore: prepare ${version} release`]);
 
-    if (publishReleaseVersion === 'true') {
-      await exec.exec('git', ['push', 'origin', branchName]);
+    // Use API for verified commits when not committing node_modules
+    // Otherwise fall back to git CLI (node_modules too large for API)
+    let commitSha;
+    if (commitNodeModules === 'true') {
+      // Use git CLI - node_modules too large for API
+      await exec.exec('git', ['commit', '-a', '-m', `chore: prepare ${version} release`]);
+
+      if (publishReleaseVersion === 'true') {
+        await exec.exec('git', ['push', 'origin', branchName]);
+      }
+
+      // Get the commit SHA for tagging
+      let shaOutput = '';
+      await exec.exec('git', ['rev-parse', 'HEAD'], {
+        listeners: {
+          stdout: data => {
+            shaOutput += data.toString();
+          }
+        }
+      });
+      commitSha = shaOutput.trim();
+    } else {
+      // Use GitHub API for verified commits
+      commitSha = await createCommitViaAPI(
+        octokit,
+        context,
+        branchName,
+        version,
+        commitDistFolder,
+        publishReleaseVersion
+      );
     }
 
-    await exec.exec('git', ['push', 'origin', `:refs/tags/${version}`]);
-    await exec.exec('git', ['tag', '-fa', version, '-m', version]);
+    core.info(`Commit SHA for tagging: ${commitSha}`);
+
+    // Create annotated tags via API
+    // Delete existing tags first
+    try {
+      await octokit.rest.git.deleteRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `tags/${version}`
+      });
+      core.info(`Deleted existing tag ${version}`);
+    } catch (_error) {
+      core.info(`Tag ${version} doesn't exist yet`);
+    }
+
+    // Create annotated tag object
+    const { data: versionTag } = await octokit.rest.git.createTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag: version,
+      message: version,
+      object: commitSha,
+      type: 'commit'
+    });
+    core.info(`Created annotated tag object ${version}: ${versionTag.sha}`);
+
+    // Create the tag reference
+    await octokit.rest.git.createRef({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      ref: `refs/tags/${version}`,
+      sha: versionTag.sha
+    });
+    core.info(`Created tag reference ${version}`);
 
     if (publishMinorVersion === 'true') {
-      await exec.exec('git', ['push', 'origin', `:refs/tags/${minorVersion}`]);
-      await exec.exec('git', ['tag', '-f', minorVersion]);
+      try {
+        await octokit.rest.git.deleteRef({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          ref: `tags/${minorVersion}`
+        });
+        core.info(`Deleted existing tag ${minorVersion}`);
+      } catch (_error) {
+        core.info(`Tag ${minorVersion} doesn't exist yet`);
+      }
+
+      // Create annotated tag object for minor version
+      const { data: minorTag } = await octokit.rest.git.createTag({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        tag: minorVersion,
+        message: minorVersion,
+        object: commitSha,
+        type: 'commit'
+      });
+      core.info(`Created annotated tag object ${minorVersion}: ${minorTag.sha}`);
+
+      await octokit.rest.git.createRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `refs/tags/${minorVersion}`,
+        sha: minorTag.sha
+      });
+      core.info(`Created tag reference ${minorVersion}`);
     }
 
-    await exec.exec('git', ['push', 'origin', `:refs/tags/${majorVersion}`]);
-    await exec.exec('git', ['tag', '-f', majorVersion]);
-    await exec.exec('git push --tags origin');
+    // Create major version tag
+    try {
+      await octokit.rest.git.deleteRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `tags/${majorVersion}`
+      });
+      core.info(`Deleted existing tag ${majorVersion}`);
+    } catch (_error) {
+      core.info(`Tag ${majorVersion} doesn't exist yet`);
+    }
+
+    // Create annotated tag object for major version
+    const { data: majorTag } = await octokit.rest.git.createTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag: majorVersion,
+      message: majorVersion,
+      object: commitSha,
+      type: 'commit'
+    });
+    core.info(`Created annotated tag object ${majorVersion}: ${majorTag.sha}`);
+
+    await octokit.rest.git.createRef({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      ref: `refs/tags/${majorVersion}`,
+      sha: majorTag.sha
+    });
+    core.info(`Created tag reference ${majorVersion}`);
 
     // Find the previous semver release to use as baseline for release notes
     const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
