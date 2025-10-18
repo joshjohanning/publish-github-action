@@ -13,9 +13,10 @@ Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publis
 ## Features
 
 - 🔐 **Verified Commits** - Uses GitHub API to create verified commits (when `commit_node_modules` is `false`)
-- 🏷️ **Annotated Tags** - Creates proper annotated tags via GitHub API
-- 🌐 **GHES Support** - Works with GitHub Enterprise Server
-- 📦 **Flexible Build** - Supports custom build commands and selective file commits
+- 🏷️ **Annotated Tags** - Creates annotated tags via Git CLI with atomic updates (no downtime)
+- 🌐 **Multi-instance Support** - API URL defaults to the environment you are running in; works with GitHub.com, GitHub Enterprise Server, and GHE.com
+- 📦 **Flexible Build** - Automatically installs production dependencies and supports custom build commands
+- 🗂️ **Selective Commits** - Choose which files to include (dist, node_modules, or both)
 
 ## Inputs
 
