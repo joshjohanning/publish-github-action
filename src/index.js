@@ -41,7 +41,7 @@ export async function run() {
     }
 
     await exec.exec('git', ['checkout', '-b', branchName]);
-    await exec.exec('npm install --production');
+    await exec.exec('npm ci --production');
     await exec.exec('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
     await exec.exec('git config --global user.name "github-actions[bot]"');
     await exec.exec('git', [
@@ -65,7 +65,7 @@ export async function run() {
     }
 
     await exec.exec('git rm -r .github');
-    await exec.exec('git commit -a -m "prod dependencies"');
+    await exec.exec('git commit -a -m "chore: prod dependencies"');
 
     if (publishReleaseVersion === 'true') {
       await exec.exec('git', ['push', 'origin', branchName]);
