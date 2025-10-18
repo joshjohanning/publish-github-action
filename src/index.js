@@ -209,6 +209,12 @@ export async function run() {
     ]);
 
     if (npmPackageCommand) {
+      // Clean dist folder before building to remove stale files
+      if (commitDistFolder === 'true') {
+        await exec.exec('rm', ['-rf', 'dist']);
+        core.info('Cleaned dist folder before build');
+      }
+
       await exec.exec(npmPackageCommand);
       await exec.exec('git add .');
     }
