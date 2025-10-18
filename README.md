@@ -20,15 +20,15 @@ Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publis
 
 ## Inputs
 
-| Input                      | Description                                                                                                                                        | Required | Default                   |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------- |
-| `github_token`             | Token for the GitHub API                                                                                                                           | Yes      | -                         |
-| `github_api_url`           | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                       | No       | `${{ github.api_url }}`   |
-| `npm_package_command`      | Command to build the action                                                                                                                        | No       | `npm run package`         |
-| `commit_node_modules`      | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts | No       | `false`                   |
-| `commit_dist_folder`       | Whether to commit `dist` folder                                                                                                                    | No       | `true`                    |
-| `publish_minor_version`    | Whether to publish minor version tag (e.g., `v1.2`)                                                                                                | No       | `false`                   |
-| `publish_release_branch`   | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                        | No       | `false`                   |
+| Input                    | Description                                                                                                                                       | Required | Default                 |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------- |
+| `github_token`           | Token for the GitHub API                                                                                                                          | Yes      | -                       |
+| `github_api_url`         | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                       | No       | `${{ github.api_url }}` |
+| `npm_package_command`    | Command to build the action                                                                                                                       | No       | `npm run package`       |
+| `commit_node_modules`    | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts | No       | `false`                 |
+| `commit_dist_folder`     | Whether to commit `dist` folder                                                                                                                   | No       | `true`                  |
+| `publish_minor_version`  | Whether to publish minor version tag (e.g., `v1.2`)                                                                                               | No       | `false`                 |
+| `publish_release_branch` | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                       | No       | `false`                 |
 
 ### Commit Signing Behavior
 
