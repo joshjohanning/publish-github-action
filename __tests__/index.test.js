@@ -535,6 +535,253 @@ describe('Publish GitHub Action', () => {
         })
       );
     });
+
+    test('should handle modifying existing dist files', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      // Mock existing tree with dist file that will be modified
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'oldsha1' },
+            { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
+          ]
+        }
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'modified dist content';
+      });
+
+      await run();
+
+      // Should mark old file for deletion and add new version
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: expect.arrayContaining([
+            // Old version marked for deletion
+            expect.objectContaining({
+              path: 'dist/index.js',
+              sha: null
+            }),
+            // New version added
+            expect.objectContaining({
+              path: 'dist/index.js',
+              content: 'modified dist content'
+            })
+          ])
+        })
+      );
+    });
+
+    test('should handle deleting dist files', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      // Mock existing tree with multiple dist files
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'oldsha1' },
+            { path: 'dist/utils.js', mode: '100644', type: 'blob', sha: 'oldsha2' },
+            { path: 'dist/removed.js', mode: '100644', type: 'blob', sha: 'oldsha3' },
+            { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
+          ]
+        }
+      });
+
+      // Mock readdirSync to return only 2 files (removed.js is deleted)
+      mockFs.readdirSync.mockReturnValue(['index.js', 'utils.js']);
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      // Should mark all old files for deletion
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: expect.arrayContaining([
+            // All old dist files marked for deletion
+            expect.objectContaining({
+              path: 'dist/index.js',
+              sha: null
+            }),
+            expect.objectContaining({
+              path: 'dist/utils.js',
+              sha: null
+            }),
+            expect.objectContaining({
+              path: 'dist/removed.js',
+              sha: null
+            }),
+            // Only 2 new files added (removed.js not included)
+            expect.objectContaining({
+              path: 'dist/index.js',
+              content: 'dist file content'
+            }),
+            expect.objectContaining({
+              path: 'dist/utils.js',
+              content: 'dist file content'
+            })
+          ])
+        })
+      );
+
+      // Verify removed.js is NOT added back
+      const createTreeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
+      const addedFiles = createTreeCall.tree.filter(item => item.content && item.path.startsWith('dist/'));
+      expect(addedFiles).toHaveLength(2);
+      expect(addedFiles.some(f => f.path === 'dist/removed.js')).toBe(false);
+    });
+
+    test('should handle adding new dist files', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      // Mock existing tree with one dist file
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'oldsha1' },
+            { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
+          ]
+        }
+      });
+
+      // Mock readdirSync to return 3 files (2 new ones added)
+      mockFs.readdirSync.mockReturnValue(['index.js', 'new-module.js', 'another-new.js']);
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      // Should mark old file for deletion and add all 3 files
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: expect.arrayContaining([
+            // Old file marked for deletion
+            expect.objectContaining({
+              path: 'dist/index.js',
+              sha: null
+            }),
+            // All 3 files added
+            expect.objectContaining({
+              path: 'dist/index.js',
+              content: 'dist file content'
+            }),
+            expect.objectContaining({
+              path: 'dist/new-module.js',
+              content: 'dist file content'
+            }),
+            expect.objectContaining({
+              path: 'dist/another-new.js',
+              content: 'dist file content'
+            })
+          ])
+        })
+      );
+
+      // Verify all 3 new files are added
+      const createTreeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
+      const addedFiles = createTreeCall.tree.filter(item => item.content && item.path.startsWith('dist/'));
+      expect(addedFiles).toHaveLength(3);
+    });
+
+    test('should remove .github folder in API path', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      // Mock existing tree with .github files
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' },
+            { path: '.github/workflows/test.yml', mode: '100644', type: 'blob', sha: 'workflow2' },
+            { path: '.github/dependabot.yml', mode: '100644', type: 'blob', sha: 'dependabot' },
+            { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'dist1' },
+            { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
+          ]
+        }
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      // Should mark all .github files for deletion
+      expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tree: expect.arrayContaining([
+            expect.objectContaining({
+              path: '.github/workflows/ci.yml',
+              sha: null
+            }),
+            expect.objectContaining({
+              path: '.github/workflows/test.yml',
+              sha: null
+            }),
+            expect.objectContaining({
+              path: '.github/dependabot.yml',
+              sha: null
+            })
+          ])
+        })
+      );
+
+      // Verify .github files are marked for deletion
+      const createTreeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
+      const deletedGithubFiles = createTreeCall.tree.filter(
+        item => item.sha === null && item.path.startsWith('.github/')
+      );
+      expect(deletedGithubFiles).toHaveLength(3);
+    });
   });
 
   describe('Git CLI path', () => {
