@@ -6,7 +6,8 @@
 import * as core from '@actions/core';
 import * as exec from '@actions/exec';
 import * as github from '@actions/github';
-import { readFileSync, rmSync } from 'fs';
+import { readFileSync, rmSync, readdirSync, statSync } from 'fs';
+import { join } from 'path';
 import * as semver from 'semver';
 
 /**
@@ -140,10 +141,7 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
  * @param {string} dir - Directory to scan
  * @returns {Array} Array of file objects with path
  */
-async function getFilesRecursively(dir) {
-  const { readdirSync, statSync } = await import('fs');
-  const { join } = await import('path');
-
+function getFilesRecursively(dir) {
   const files = [];
 
   function scan(currentDir) {
