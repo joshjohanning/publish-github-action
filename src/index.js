@@ -48,7 +48,7 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
         owner: context.repo.owner,
         repo: context.repo.repo,
         tree_sha: commit.tree.sha,
-        recursive: 'true'
+        recursive: true
       });
       existingTree = tree.tree;
     } catch (error) {
