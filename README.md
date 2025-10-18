@@ -35,6 +35,13 @@ Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publis
 - ✅ **Verified commits** (signed by GitHub) when `commit_node_modules: false` - Uses GitHub API for commits; tags are created locally via Git CLI
 - ❌ **Unverified commits** when `commit_node_modules: true` - Uses Git CLI due to API limitations with large file counts
 
+### Build and File Management
+
+The action automatically handles clean builds and file management:
+
+- **Dist folder cleaning**: When `commit_dist_folder: true` and `npm_package_command` is specified, the `dist/` folder is cleaned before building to ensure no stale files persist
+- **Automatic file deletion**: The action removes `.github/` files from release commits and properly handles renamed/deleted files in the `dist/` folder
+
 ## Example Workflow
 
 ```yml
