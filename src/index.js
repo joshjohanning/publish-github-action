@@ -148,7 +148,7 @@ function getFilesRecursively(dir) {
     const items = readdirSync(currentDir);
 
     for (const item of items) {
-      const fullPath = join(currentDir, item);
+      const fullPath = join(currentDir, item).replace(/\\/g, '/');
       const stat = statSync(fullPath);
 
       if (stat.isDirectory()) {
