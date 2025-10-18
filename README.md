@@ -10,6 +10,30 @@ This action creates a release branch for your GitHub Actions which will be autom
 
 Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publish-github-action) action, but I wanted further customization and control over the release process (i.e.: adding `ncc` output and not committing `node_modules` directory).
 
+## Features
+
+- 🔐 **Verified Commits** - Uses GitHub API to create verified commits (when `commit_node_modules` is `false`)
+- 🏷️ **Annotated Tags** - Creates proper annotated tags via GitHub API
+- 🌐 **GHES Support** - Works with GitHub Enterprise Server
+- 📦 **Flexible Build** - Supports custom build commands and selective file commits
+
+## Inputs
+
+| Input                    | Description                                                                                                                                        | Required | Default                 |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------- |
+| `github_token`           | Token for the GitHub API                                                                                                                           | Yes      | -                       |
+| `github_api_url`         | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                        | No       | `${{ github.api_url }}` |
+| `npm_package_command`    | Command to build the action                                                                                                                        | No       | `npm run package`       |
+| `commit_node_modules`    | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts. | No       | `false`                 |
+| `commit_dist_folder`     | Whether to commit `dist` folder                                                                                                                    | No       | `true`                  |
+| `publish_minor_version`  | Whether to publish minor version tag (e.g., `v1.2`)                                                                                                | No       | `false`                 |
+| `publish_release_branch` | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                        | No       | `false`                 |
+
+### Commit Signing Behavior
+
+- ✅ **Verified commits** (signed by GitHub) when `commit_node_modules: false` - Uses GitHub API for commits and tags
+- ❌ **Unverified commits** when `commit_node_modules: true` - Uses Git CLI due to API limitations with large file counts
+
 ## Example Workflow
 
 ```yml
