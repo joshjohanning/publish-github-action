@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
