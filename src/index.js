@@ -177,7 +177,8 @@ export async function run() {
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
 
     const context = github.context;
-    const octokit = github.getOctokit(githubToken, { baseUrl: githubApiUrl });
+    const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
+    const octokit = github.getOctokit(githubToken, opts);
 
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
