@@ -6,7 +6,7 @@
 import * as core from '@actions/core';
 import * as exec from '@actions/exec';
 import * as github from '@actions/github';
-import { readFileSync } from 'fs';
+import { readFileSync, rmSync } from 'fs';
 import * as semver from 'semver';
 
 /**
@@ -211,7 +211,7 @@ export async function run() {
     if (npmPackageCommand) {
       // Clean dist folder before building to remove stale files
       if (commitDistFolder === 'true') {
-        await exec.exec('rm', ['-rf', 'dist']);
+        rmSync('dist', { recursive: true, force: true });
         core.info('Cleaned dist folder before build');
       }
 
