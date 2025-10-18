@@ -56,9 +56,6 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
       core.info(`Added ${distFiles.length} files from dist folder`);
     }
 
-    // Remove .github folder by not including it in the tree
-    core.info('Excluding .github folder from tree');
-
     // 4. Create new tree
     const { data: newTree } = await octokit.rest.git.createTree({
       owner: context.repo.owner,
@@ -180,6 +177,7 @@ export async function run() {
       await exec.exec('git add -f dist');
     }
 
+    // Remove .github folder (only effective for Git CLI path; API path retains it in base tree)
     await exec.exec('git rm -r .github');
 
     // Use API for verified commits when not committing node_modules
