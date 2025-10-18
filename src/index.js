@@ -65,7 +65,7 @@ export async function run() {
     }
 
     await exec.exec('git rm -r .github');
-    await exec.exec('git commit -a -m "prod dependencies"');
+    await exec.exec('git commit -a -m "chore: prod dependencies"');
 
     if (publishReleaseVersion === 'true') {
       await exec.exec('git', ['push', 'origin', branchName]);
