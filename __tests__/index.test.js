@@ -506,7 +506,7 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.git.getTree).toHaveBeenCalledWith(
         expect.objectContaining({
           tree_sha: 'tree123',
-          recursive: 'true'
+          recursive: true
         })
       );
 
