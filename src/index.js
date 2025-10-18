@@ -229,7 +229,8 @@ export async function run() {
 
     // Remove .github folder from local git (for Git CLI path)
     // API path also removes .github by marking files for deletion in the tree
-    await exec.exec('git rm -r .github');
+    // Use --ignore-unmatch to avoid failure if .github doesn't exist
+    await exec.exec('git', ['rm', '-r', '--ignore-unmatch', '.github']);
 
     // Use API for verified commits when not committing node_modules
     // Otherwise fall back to git CLI (node_modules too large for API)
