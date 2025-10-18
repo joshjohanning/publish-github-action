@@ -32,7 +32,7 @@ Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publis
 
 ### Commit Signing Behavior
 
-- ✅ **Verified commits** (signed by GitHub) when `commit_node_modules: false` - Uses GitHub API for commits and tags
+- ✅ **Verified commits** (signed by GitHub) when `commit_node_modules: false` - Uses GitHub API for commits; tags are created locally via Git CLI
 - ❌ **Unverified commits** when `commit_node_modules: true` - Uses Git CLI due to API limitations with large file counts
 
 ## Example Workflow
