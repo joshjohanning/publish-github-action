@@ -41,7 +41,7 @@ export async function run() {
     }
 
     await exec.exec('git', ['checkout', '-b', branchName]);
-    await exec.exec('npm ci --production');
+    await exec.exec('npm', ['ci', '--omit=dev']);
     await exec.exec('git config --global user.email "github-actions[bot]@users.noreply.github.com"');
     await exec.exec('git config --global user.name "github-actions[bot]"');
     await exec.exec('git', [
