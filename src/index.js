@@ -221,101 +221,30 @@ export async function run() {
 
     core.info(`Commit SHA for tagging: ${commitSha}`);
 
-    // Create annotated tags via API
-    // Delete existing tags first
-    try {
-      await octokit.rest.git.deleteRef({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref: `tags/${version}`
-      });
-      core.info(`Deleted existing tag ${version}`);
-    } catch (_error) {
-      core.info(`Tag ${version} doesn't exist yet`);
-    }
-
-    // Create annotated tag object
-    const { data: versionTag } = await octokit.rest.git.createTag({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      tag: version,
-      message: version,
-      object: commitSha,
-      type: 'commit'
-    });
-    core.info(`Created annotated tag object ${version}: ${versionTag.sha}`);
-
-    // Create the tag reference
-    await octokit.rest.git.createRef({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      ref: `refs/tags/${version}`,
-      sha: versionTag.sha
-    });
-    core.info(`Created tag reference ${version}`);
+    // Create annotated tags via Git CLI for atomic updates (no downtime)
+    // Tags will point to verified commits created via API
+    await exec.exec('git', ['tag', '-fa', version, '-m', version, commitSha]);
+    core.info(`Created annotated tag ${version}`);
 
     if (publishMinorVersion === 'true') {
-      try {
-        await octokit.rest.git.deleteRef({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          ref: `tags/${minorVersion}`
-        });
-        core.info(`Deleted existing tag ${minorVersion}`);
-      } catch (_error) {
-        core.info(`Tag ${minorVersion} doesn't exist yet`);
-      }
-
-      // Create annotated tag object for minor version
-      const { data: minorTag } = await octokit.rest.git.createTag({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        tag: minorVersion,
-        message: minorVersion,
-        object: commitSha,
-        type: 'commit'
-      });
-      core.info(`Created annotated tag object ${minorVersion}: ${minorTag.sha}`);
-
-      await octokit.rest.git.createRef({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref: `refs/tags/${minorVersion}`,
-        sha: minorTag.sha
-      });
-      core.info(`Created tag reference ${minorVersion}`);
+      await exec.exec('git', ['tag', '-fa', minorVersion, '-m', minorVersion, commitSha]);
+      core.info(`Created annotated tag ${minorVersion}`);
     }
 
-    // Create major version tag
-    try {
-      await octokit.rest.git.deleteRef({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref: `tags/${majorVersion}`
-      });
-      core.info(`Deleted existing tag ${majorVersion}`);
-    } catch (_error) {
-      core.info(`Tag ${majorVersion} doesn't exist yet`);
+    await exec.exec('git', ['tag', '-fa', majorVersion, '-m', majorVersion, commitSha]);
+    core.info(`Created annotated tag ${majorVersion}`);
+
+    // Push tags atomically (force push to update existing tags)
+    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${version}`]);
+    core.info(`Pushed tag ${version}`);
+
+    if (publishMinorVersion === 'true') {
+      await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${minorVersion}`]);
+      core.info(`Pushed tag ${minorVersion}`);
     }
 
-    // Create annotated tag object for major version
-    const { data: majorTag } = await octokit.rest.git.createTag({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      tag: majorVersion,
-      message: majorVersion,
-      object: commitSha,
-      type: 'commit'
-    });
-    core.info(`Created annotated tag object ${majorVersion}: ${majorTag.sha}`);
-
-    await octokit.rest.git.createRef({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      ref: `refs/tags/${majorVersion}`,
-      sha: majorTag.sha
-    });
-    core.info(`Created tag reference ${majorVersion}`);
+    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${majorVersion}`]);
+    core.info(`Pushed tag ${majorVersion}`);
 
     // Find the previous semver release to use as baseline for release notes
     const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;

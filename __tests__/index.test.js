@@ -89,6 +89,7 @@ describe('Publish GitHub Action', () => {
     mockCore.getInput.mockImplementation(name => {
       const inputs = {
         github_token: 'test-token',
+        github_api_url: 'https://api.github.com',
         npm_package_command: 'npm run package',
         commit_node_modules: 'false',
         commit_dist_folder: 'true',
@@ -122,7 +123,7 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
     mockOctokit.rest.repos.createRelease.mockResolvedValue({ data: { id: 123 } });
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
-    
+
     // Mock Git API calls
     mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'abc123' } } });
     mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { tree: { sha: 'tree123' } } });
@@ -208,7 +209,7 @@ describe('Publish GitHub Action', () => {
       });
 
       // Mock readFileSync to return both package.json and dist file content
-      mockFs.readFileSync.mockImplementation((path, encoding) => {
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
         if (path === 'package.json') {
           return JSON.stringify({ name: 'test-action', version: '1.2.3' });
         }
@@ -223,10 +224,10 @@ describe('Publish GitHub Action', () => {
           message: 'chore: prepare v1.2.3 release'
         })
       );
-      
-      // Should create annotated tags via API
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalled();
-      expect(mockOctokit.rest.git.createRef).toHaveBeenCalled();
+
+      // Should create annotated tags via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'commit123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
     });
 
     test('should publish minor version when enabled', async () => {
@@ -242,13 +243,9 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should create minor version tag via API
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tag: 'v1.2',
-          message: 'v1.2'
-        })
-      );
+      // Should create minor version tag via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2', '-m', 'v1.2', 'commit123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2']);
     });
 
     test('should publish release branch when enabled', async () => {
@@ -366,36 +363,17 @@ describe('Publish GitHub Action', () => {
       await run();
 
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v2.0.0']);
-      // Should create annotated tags via API
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tag: 'v2.0.0',
-          message: 'v2.0.0'
-        })
-      );
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tag: 'v2',
-          message: 'v2'
-        })
-      );
+      // Should create annotated tags via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2.0.0', '-m', 'v2.0.0', 'commit123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2', '-m', 'v2', 'commit123']);
     });
 
     test('should always create major version tag', async () => {
       await run();
 
-      // Major version tag should always be created
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tag: 'v1',
-          message: 'v1'
-        })
-      );
-      expect(mockOctokit.rest.git.createRef).toHaveBeenCalledWith(
-        expect.objectContaining({
-          ref: 'refs/tags/v1'
-        })
-      );
+      // Major version tag should always be created via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1', '-m', 'v1', 'commit123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1']);
     });
   });
 
@@ -412,7 +390,7 @@ describe('Publish GitHub Action', () => {
         return inputs[name] || '';
       });
 
-      mockFs.readFileSync.mockImplementation((path, encoding) => {
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
         if (path === 'package.json') {
           return JSON.stringify({ name: 'test-action', version: '1.2.3' });
         }
@@ -423,16 +401,16 @@ describe('Publish GitHub Action', () => {
 
       // Should create commit via API
       expect(mockOctokit.rest.git.createCommit).toHaveBeenCalled();
-      
+
       // Should NOT update branch reference
       expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalledWith(
         expect.objectContaining({
           ref: 'heads/releases/v1.2.3'
         })
       );
-      
-      // Should still create tags
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalled();
+
+      // Should still create tags via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'commit123']);
     });
 
     test('should handle empty tree when commitDistFolder is false', async () => {
@@ -501,13 +479,14 @@ describe('Publish GitHub Action', () => {
 
       // Should use git CLI for commit
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['commit', '-a', '-m', 'chore: prepare v1.2.3 release']);
-      
+
       // Should get commit SHA via git rev-parse
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['rev-parse', 'HEAD'], expect.any(Object));
-      
-      // Should still create tags via API
-      expect(mockOctokit.rest.git.createTag).toHaveBeenCalled();
-      
+
+      // Should create tags via Git CLI
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'gitcommitsha123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+
       // Should NOT use API for commit
       expect(mockOctokit.rest.git.createCommit).not.toHaveBeenCalled();
     });
@@ -541,13 +520,18 @@ describe('Publish GitHub Action', () => {
   });
 
   describe('Tag deletion', () => {
-    test('should handle tag deletion errors gracefully', async () => {
-      mockOctokit.rest.git.deleteRef.mockRejectedValue(new Error('Tag not found'));
-
+    test('should create tags atomically via Git CLI (no deletion needed)', async () => {
       await run();
 
       // Should still complete successfully
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+
+      // Should create tags via Git CLI with -f flag for atomic updates
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'commit123']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+    });
+  });
+
       
       // Should still create tags
       expect(mockOctokit.rest.git.createTag).toHaveBeenCalled();
