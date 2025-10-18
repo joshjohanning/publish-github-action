@@ -267,6 +267,13 @@ describe('Publish GitHub Action', () => {
           ref: 'heads/releases/v1.2.3'
         })
       );
+
+      // Should NOT delete remote branch when publishReleaseVersion is true
+      expect(mockOctokit.rest.git.deleteRef).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          ref: 'heads/releases/v1.2.3'
+        })
+      );
     });
 
     test('should generate release notes with previous tag', async () => {
@@ -378,7 +385,7 @@ describe('Publish GitHub Action', () => {
   });
 
   describe('API commit path', () => {
-    test('should not update branch when publishReleaseVersion is false', async () => {
+    test('should delete remote branch when publishReleaseVersion is false', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -402,8 +409,15 @@ describe('Publish GitHub Action', () => {
       // Should create commit via API
       expect(mockOctokit.rest.git.createCommit).toHaveBeenCalled();
 
-      // Should NOT update branch reference
-      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalledWith(
+      // Should update branch reference (needed for API operations)
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ref: 'heads/releases/v1.2.3'
+        })
+      );
+
+      // Should delete remote branch after tags are created
+      expect(mockOctokit.rest.git.deleteRef).toHaveBeenCalledWith(
         expect.objectContaining({
           ref: 'heads/releases/v1.2.3'
         })

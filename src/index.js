@@ -16,10 +16,9 @@ import * as semver from 'semver';
  * @param {string} branchName - Name of the branch to commit to
  * @param {string} version - Version being released
  * @param {string} commitDistFolder - Whether to commit dist folder
- * @param {string} publishReleaseVersion - Whether to publish the release branch
  * @returns {string} The SHA of the new commit
  */
-async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder, publishReleaseVersion) {
+async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder) {
   try {
     core.info('Creating verified commit via GitHub API...');
 
@@ -79,18 +78,14 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
     });
     core.info(`Created new verified commit: ${newCommit.sha}`);
 
-    // 6. Update branch reference only if we want to keep the release branch
-    if (publishReleaseVersion === 'true') {
-      await octokit.rest.git.updateRef({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref: `heads/${branchName}`,
-        sha: newCommit.sha
-      });
-      core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
-    } else {
-      core.info(`Skipping branch update - commit will be accessible via tags only`);
-    }
+    // 6. Update branch reference with new commit
+    await octokit.rest.git.updateRef({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      ref: `heads/${branchName}`,
+      sha: newCommit.sha
+    });
+    core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
 
     return newCommit.sha;
   } catch (error) {
@@ -194,9 +189,8 @@ export async function run() {
       // Use git CLI - node_modules too large for API
       await exec.exec('git', ['commit', '-a', '-m', `chore: prepare ${version} release`]);
 
-      if (publishReleaseVersion === 'true') {
-        await exec.exec('git', ['push', 'origin', branchName]);
-      }
+      // Always push release branch (needed for API operations, cleaned up later if needed)
+      await exec.exec('git', ['push', 'origin', branchName]);
 
       // Get the commit SHA for tagging
       let shaOutput = '';
@@ -210,14 +204,10 @@ export async function run() {
       commitSha = shaOutput.trim();
     } else {
       // Use GitHub API for verified commits
-      commitSha = await createCommitViaAPI(
-        octokit,
-        context,
-        branchName,
-        version,
-        commitDistFolder,
-        publishReleaseVersion
-      );
+      // Push branch first so API can reference it
+      await exec.exec('git', ['push', 'origin', branchName]);
+
+      commitSha = await createCommitViaAPI(octokit, context, branchName, version, commitDistFolder);
     }
 
     core.info(`Commit SHA for tagging: ${commitSha}`);
@@ -246,6 +236,20 @@ export async function run() {
 
     await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${majorVersion}`]);
     core.info(`Pushed tag ${majorVersion}`);
+
+    // Clean up release branch if not publishing
+    if (publishReleaseVersion !== 'true') {
+      try {
+        await octokit.rest.git.deleteRef({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          ref: `heads/${branchName}`
+        });
+        core.info(`Deleted remote release branch ${branchName} (commit accessible via tags)`);
+      } catch (error) {
+        core.warning(`Failed to delete release branch ${branchName}: ${error.message}`);
+      }
+    }
 
     // Find the previous semver release to use as baseline for release notes
     const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
