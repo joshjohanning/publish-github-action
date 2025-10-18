@@ -8,6 +8,10 @@ inputs:
   github_token:
     description: 'Token for the github API'
     required: true
+  github_api_url:
+    description: 'GitHub API URL (e.g., https://api.github.com for GitHub.com or https://ghes.domain.com/api/v3 for GHES)'
+    required: false
+    default: '${{ github.api_url }}'
   npm_package_command:
     description: 'Command to build the action'
     default: 'npm run package'
