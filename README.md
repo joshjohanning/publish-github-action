@@ -65,7 +65,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
           commit_node_modules: false
-          commit_dist_folder: true # defaults to true
+          commit_dist_folder: false # defaults to true
           publish_minor_version: false
           publish_release_branch: false
+          create_release_as_draft: false
 ```
