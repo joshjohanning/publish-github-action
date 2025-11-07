@@ -46,6 +46,9 @@ The action automatically handles clean builds and file management:
 
 ## Example Workflow
 
+> [!NOTE]
+> The `install ncc` step is only needed if `@vercel/ncc` is not in your `package.json` devDependencies. If you already have it as a dev dependency, you can skip this step.
+
 ```yml
 name: 'Publish GitHub Action'
 on:
@@ -60,7 +63,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: install ncc
         run: npm i -g @vercel/ncc
-      - uses: joshjohanning/publish-github-action@v1
+      - uses: joshjohanning/publish-github-action@v2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
