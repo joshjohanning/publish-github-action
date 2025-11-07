@@ -32,6 +32,10 @@ inputs:
     description: 'Change to true to publish release branch'
     default: 'false'
     required: false
+  create_release_as_draft:
+    description: 'Change to true to create release as draft'
+    default: 'false'
+    required: false
 runs:
   using: 'node20'
   main: 'dist/index.js'

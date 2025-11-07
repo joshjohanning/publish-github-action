@@ -97,7 +97,8 @@ describe('Publish GitHub Action', () => {
         commit_node_modules: 'false',
         commit_dist_folder: 'true',
         publish_minor_version: 'false',
-        publish_release_branch: 'false'
+        publish_release_branch: 'false',
+        create_release_as_draft: 'false'
       };
       return inputs[name] || '';
     });
@@ -303,7 +304,8 @@ describe('Publish GitHub Action', () => {
         repo: 'test-repo',
         tag_name: 'v1.2.3',
         name: 'v1.2.3',
-        body: 'Generated release notes'
+        body: 'Generated release notes',
+        draft: false
       });
     });
 
@@ -327,7 +329,8 @@ describe('Publish GitHub Action', () => {
         repo: 'test-repo',
         tag_name: 'v1.2.3',
         name: 'v1.2.3',
-        body: ''
+        body: '',
+        draft: false
       });
     });
 
@@ -341,6 +344,33 @@ describe('Publish GitHub Action', () => {
         owner: 'test-owner',
         repo: 'test-repo',
         tag_name: 'v1.2.3'
+      });
+    });
+
+    test('should create release as draft when create_release_as_draft is true', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://api.github.com',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          publish_minor_version: 'false',
+          publish_release_branch: 'false',
+          create_release_as_draft: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        tag_name: 'v1.2.3',
+        name: 'v1.2.3',
+        body: 'Generated release notes',
+        draft: true
       });
     });
   });
