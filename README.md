@@ -2,6 +2,7 @@
 
 [![GitHub release](https://img.shields.io/github/release/joshjohanning/publish-github-action.svg?labelColor=333)](https://github.com/joshjohanning/publish-github-action/releases)
 [![Immutable Releases](https://img.shields.io/badge/releases-immutable-blue?labelColor=333)](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
+[![GitHub marketplace](https://img.shields.io/badge/marketplace-publish--github--action--with--ncc-blue?logo=github&labelColor=333)](https://github.com/marketplace/actions/publish-github-action-with-ncc)
 [![CI](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml/badge.svg)](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml)
 [![Publish GitHub Action](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml/badge.svg?branch=main&event=push)](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml)
 ![Coverage](./badges/coverage.svg)
