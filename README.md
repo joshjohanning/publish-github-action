@@ -1,7 +1,8 @@
 # Publish GitHub Action
 
 [![GitHub release](https://img.shields.io/github/release/joshjohanning/publish-github-action.svg?labelColor=333)](https://github.com/joshjohanning/publish-github-action/releases)
-[![GitHub marketplace](https://img.shields.io/badge/marketplace-publish--github--action--with--ncc-blue?logo=github)](https://github.com/marketplace/actions/publish-github-action-with-ncc)
+[![Immutable Releases](https://img.shields.io/badge/releases-immutable-blue?labelColor=333)](https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases)
+[![GitHub marketplace](https://img.shields.io/badge/marketplace-publish--github--action--with--ncc-blue?logo=github&labelColor=333)](https://github.com/marketplace/actions/publish-github-action-with-ncc)
 [![CI](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml/badge.svg)](https://github.com/joshjohanning/publish-github-action/actions/workflows/ci.yml)
 [![Publish GitHub Action](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml/badge.svg?branch=main&event=push)](https://github.com/joshjohanning/publish-github-action/actions/workflows/publish.yml)
 ![Coverage](./badges/coverage.svg)
@@ -20,15 +21,16 @@ Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publis
 
 ## Inputs
 
-| Input                    | Description                                                                                                                                       | Required | Default                 |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------- |
-| `github_token`           | Token for the GitHub API                                                                                                                          | Yes      | -                       |
-| `github_api_url`         | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                       | No       | `${{ github.api_url }}` |
-| `npm_package_command`    | Command to build the action                                                                                                                       | No       | `npm run package`       |
-| `commit_node_modules`    | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts | No       | `false`                 |
-| `commit_dist_folder`     | Whether to commit `dist` folder                                                                                                                   | No       | `true`                  |
-| `publish_minor_version`  | Whether to publish minor version tag (e.g., `v1.2`)                                                                                               | No       | `false`                 |
-| `publish_release_branch` | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                       | No       | `false`                 |
+| Input                     | Description                                                                                                                                                                                                                                                                                                  | Required | Default                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ----------------------- |
+| `github_token`            | Token for the GitHub API                                                                                                                                                                                                                                                                                     | Yes      | -                       |
+| `github_api_url`          | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                                                                                                                                                                                  | No       | `${{ github.api_url }}` |
+| `npm_package_command`     | Command to build the action                                                                                                                                                                                                                                                                                  | No       | `npm run package`       |
+| `commit_node_modules`     | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts                                                                                                                                                            | No       | `false`                 |
+| `commit_dist_folder`      | Whether to commit `dist` folder                                                                                                                                                                                                                                                                              | No       | `true`                  |
+| `publish_minor_version`   | Whether to publish minor version tag (e.g., `v1.2`)                                                                                                                                                                                                                                                          | No       | `false`                 |
+| `publish_release_branch`  | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                                                                                                                                                                                  | No       | `false`                 |
+| `create_release_as_draft` | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing | No       | `false`                 |
 
 ### Commit Signing Behavior
 

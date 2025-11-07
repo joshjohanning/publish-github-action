@@ -175,6 +175,7 @@ export async function run() {
     const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
     const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
+    const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
 
     const context = github.context;
     const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
@@ -359,7 +360,8 @@ export async function run() {
       repo: context.repo.repo,
       tag_name: version,
       name: version,
-      body: releaseNotes
+      body: releaseNotes,
+      draft: createReleaseAsDraft === 'true'
     });
 
     core.info('✅ Action completed successfully!');
