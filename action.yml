@@ -38,7 +38,7 @@ inputs:
     required: false
   draft_release_pr_reminder:
     description: 'Post a reminder comment on the merged PR when creating a draft release'
-    default: 'true'
+    default: 'false'
     required: false
 runs:
   using: 'node20'
