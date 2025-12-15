@@ -36,6 +36,10 @@ inputs:
     description: 'Change to true to create release as draft'
     default: 'false'
     required: false
+  draft_release_pr_reminder:
+    description: 'Post a reminder comment on the merged PR when creating a draft release'
+    default: 'true'
+    required: false
 runs:
   using: 'node20'
   main: 'dist/index.js'

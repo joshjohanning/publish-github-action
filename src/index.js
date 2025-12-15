@@ -176,6 +176,7 @@ export async function run() {
     const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
+    const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
 
     const context = github.context;
     const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
@@ -355,7 +356,7 @@ export async function run() {
       core.info(`Could not generate release notes: ${error.message}`);
     }
 
-    await octokit.rest.repos.createRelease({
+    const release = await octokit.rest.repos.createRelease({
       owner: context.repo.owner,
       repo: context.repo.repo,
       tag_name: version,
@@ -363,6 +364,55 @@ export async function run() {
       body: releaseNotes,
       draft: createReleaseAsDraft === 'true'
     });
+
+    // Post reminder comment on merged PR if draft release was created
+    if (createReleaseAsDraft === 'true' && draftReleasePrReminder !== 'false') {
+      try {
+        // Find the PR associated with the current commit (the merge commit)
+        const commitShaForPr = context.sha;
+        const { data: prs } = await octokit.rest.repos.listPullRequestsAssociatedWithCommit({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          commit_sha: commitShaForPr
+        });
+
+        if (prs.length > 0) {
+          // Get the most recently merged PR by sorting by merged_at date descending
+          const mergedPrs = prs
+            .filter(pr => pr.merged_at)
+            .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+
+          if (mergedPrs.length === 0) {
+            core.info('No merged PR found for this commit, skipping PR comment');
+          } else {
+            const mergedPr = mergedPrs[0];
+            const releaseUrl = release.data.html_url;
+
+            const commentBody =
+              `## 📦 Draft Release Created\n\n` +
+              `A draft release **${version}** has been created for this PR.\n\n` +
+              `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
+              `### Next Steps\n` +
+              `- [ ] Review the release notes\n` +
+              `- [ ] Publish the release to make it permanent\n\n` +
+              `> _This is an automated reminder from the publish-github-action workflow._`;
+
+            await octokit.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: mergedPr.number,
+              body: commentBody
+            });
+
+            core.info(`Posted reminder comment on PR #${mergedPr.number}`);
+          }
+        } else {
+          core.info('No associated PR found for this commit');
+        }
+      } catch (error) {
+        core.warning(`Could not post PR comment: ${error.message}`);
+      }
+    }
 
     core.info('✅ Action completed successfully!');
   } catch (error) {

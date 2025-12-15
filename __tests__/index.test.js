@@ -21,7 +21,8 @@ const mockExec = {
 // Mock the @actions/github module
 const mockGithub = {
   context: {
-    repo: { owner: 'test-owner', repo: 'test-repo' }
+    repo: { owner: 'test-owner', repo: 'test-repo' },
+    sha: 'abc123def456'
   },
   getOctokit: jest.fn()
 };
@@ -32,7 +33,8 @@ const mockOctokit = {
     repos: {
       listTags: jest.fn(),
       listReleases: jest.fn(),
-      createRelease: jest.fn()
+      createRelease: jest.fn(),
+      listPullRequestsAssociatedWithCommit: jest.fn()
     },
     git: {
       getRef: jest.fn(),
@@ -44,6 +46,9 @@ const mockOctokit = {
       deleteRef: jest.fn(),
       createTag: jest.fn(),
       createRef: jest.fn()
+    },
+    issues: {
+      createComment: jest.fn()
     }
   },
   request: jest.fn()
@@ -98,7 +103,8 @@ describe('Publish GitHub Action', () => {
         commit_dist_folder: 'true',
         publish_minor_version: 'false',
         publish_release_branch: 'false',
-        create_release_as_draft: 'false'
+        create_release_as_draft: 'false',
+        draft_release_pr_reminder: 'true'
       };
       return inputs[name] || '';
     });
@@ -125,7 +131,11 @@ describe('Publish GitHub Action', () => {
     // Mock GitHub API calls
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
     mockOctokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
-    mockOctokit.rest.repos.createRelease.mockResolvedValue({ data: { id: 123 } });
+    mockOctokit.rest.repos.createRelease.mockResolvedValue({
+      data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
+    });
+    mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
+    mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
@@ -944,6 +954,229 @@ describe('Publish GitHub Action', () => {
 
       // Should create octokit with ghe.com baseUrl
       expect(mockGithub.getOctokit).toHaveBeenCalledWith('test-token', { baseUrl: 'https://api.octocorp.ghe.com' });
+    });
+  });
+
+  describe('PR comment feature', () => {
+    test('should post comment on merged PR when draft release is created', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z' }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        commit_sha: 'abc123def456'
+      });
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 42,
+        body: expect.stringContaining('Draft Release Created')
+      });
+
+      expect(mockCore.info).toHaveBeenCalledWith('Posted reminder comment on PR #42');
+    });
+
+    test('should not post comment when draft release is false', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'false',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    test('should not post comment when draft_release_pr_reminder is false', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'false'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    test('should handle no associated PR gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No associated PR found for this commit');
+    });
+
+    test('should skip comment when PRs exist but none are merged', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      // PRs exist but none have merged_at
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 10, merged_at: null }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No merged PR found for this commit, skipping PR comment');
+    });
+
+    test('should select most recently merged PR when multiple exist', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 10, merged_at: '2024-01-10T10:00:00Z' },
+          { number: 20, merged_at: '2024-01-20T10:00:00Z' },
+          { number: 15, merged_at: '2024-01-15T10:00:00Z' }
+        ]
+      });
+
+      await run();
+
+      // Should comment on PR #20 (most recently merged)
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 20,
+        body: expect.stringContaining('Draft Release Created')
+      });
+    });
+
+    test('should handle PR comment API failure gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockRejectedValue(new Error('API Error'));
+
+      await run();
+
+      // Should warn but not fail
+      expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });
   });
 });
