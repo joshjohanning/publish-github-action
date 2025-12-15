@@ -381,26 +381,31 @@ export async function run() {
           const mergedPrs = prs
             .filter(pr => pr.merged_at)
             .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
-          const mergedPr = mergedPrs[0] || prs[0];
-          const releaseUrl = release.data.html_url;
 
-          const commentBody =
-            `## 📦 Draft Release Created\n\n` +
-            `A draft release **${version}** has been created for this PR.\n\n` +
-            `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
-            `### Next Steps\n` +
-            `- [ ] Review the release notes\n` +
-            `- [ ] Publish the release to make it permanent\n\n` +
-            `> _This is an automated reminder from the publish-github-action workflow._`;
+          if (mergedPrs.length === 0) {
+            core.info('No merged PR found for this commit, skipping PR comment');
+          } else {
+            const mergedPr = mergedPrs[0];
+            const releaseUrl = release.data.html_url;
 
-          await octokit.rest.issues.createComment({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: mergedPr.number,
-            body: commentBody
-          });
+            const commentBody =
+              `## 📦 Draft Release Created\n\n` +
+              `A draft release **${version}** has been created for this PR.\n\n` +
+              `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
+              `### Next Steps\n` +
+              `- [ ] Review the release notes\n` +
+              `- [ ] Publish the release to make it permanent\n\n` +
+              `> _This is an automated reminder from the publish-github-action workflow._`;
 
-          core.info(`Posted reminder comment on PR #${mergedPr.number}`);
+            await octokit.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: mergedPr.number,
+              body: commentBody
+            });
+
+            core.info(`Posted reminder comment on PR #${mergedPr.number}`);
+          }
         } else {
           core.info('No associated PR found for this commit');
         }

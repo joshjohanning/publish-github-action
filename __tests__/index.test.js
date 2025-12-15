@@ -1080,6 +1080,37 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.info).toHaveBeenCalledWith('No associated PR found for this commit');
     });
 
+    test('should skip comment when PRs exist but none are merged', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          create_release_as_draft: 'true',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      // PRs exist but none have merged_at
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 10, merged_at: null }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No merged PR found for this commit, skipping PR comment');
+    });
+
     test('should select most recently merged PR when multiple exist', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
