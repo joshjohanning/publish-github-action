@@ -45,6 +45,23 @@ The action automatically handles clean builds and file management:
 - **Dist folder cleaning**: When `commit_dist_folder: true` and `npm_package_command` is specified, the `dist/` folder is cleaned before building to ensure no stale files persist
 - **Automatic file deletion**: The action removes `.github/` files from release commits and properly handles renamed/deleted files in the `dist/` folder
 
+## Permissions
+
+The action requires specific permissions depending on features used:
+
+| Permission             | Required | Purpose                                                                |
+| ---------------------- | -------- | ---------------------------------------------------------------------- |
+| `contents: write`      | Yes      | Push tags and create releases                                          |
+| `pull-requests: write` | No       | Post reminder comment on merged PR (`draft_release_pr_reminder: true`) |
+
+Example with all permissions:
+
+```yml
+permissions:
+  contents: write
+  pull-requests: write # only needed if using draft_release_pr_reminder
+```
+
 ## Example Workflow
 
 > [!NOTE]
