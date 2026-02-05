@@ -10,6 +10,96 @@ import { readFileSync, rmSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import * as semver from 'semver';
 
+/** Unique comment marker prefix for identifying comments created by this action */
+const COMMENT_MARKER_PREFIX = '<!-- publish-github-action:';
+
+/**
+ * Handle release.published event by updating the PR comment
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ */
+async function handleReleasePublished(octokit, context) {
+  // Defensive check for release payload structure
+  const release = context && context.payload ? context.payload.release : null;
+
+  if (!release || !release.tag_name || !release.html_url) {
+    core.warning('Release event missing expected payload data; cannot update PR comments.');
+    return;
+  }
+
+  const version = release.tag_name;
+  const releaseUrl = release.html_url;
+
+  // Note: The marker assumes tag_name matches the version format used when creating
+  // the initial comment (v${package.version}). If someone manually edits the tag name
+  // before publishing, the comment won't be found and updated.
+  const marker = `${COMMENT_MARKER_PREFIX}${version} -->`;
+
+  core.info(`Release published: ${version}`);
+  core.info(`Searching for PR comment with marker: ${marker}`);
+
+  try {
+    // Search for the comment in recent issues/PRs
+    // We need to find PRs and check their comments for our marker
+    //
+    // Trade-offs documented here:
+    // - This implementation could make up to 21 API calls (1 for listing PRs + up to 20 for comments)
+    // - Search is limited to the 20 most recently updated closed PRs
+    // - For high-activity repos, the relevant PR might not be in this list if there's a delay
+    //   between PR merge and release publication
+    // - Alternative: GitHub Search API with query like:
+    //   `repo:owner/repo type:issue in:comments "publish-github-action:vX.Y.Z"`
+    //   However, search indexing can have delays, making this less reliable for immediate updates
+    const { data: pulls } = await octokit.rest.pulls.list({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      state: 'closed',
+      sort: 'updated',
+      direction: 'desc',
+      per_page: 20
+    });
+
+    for (const pr of pulls) {
+      // Only check merged PRs
+      if (!pr.merged_at) continue;
+
+      const { data: comments } = await octokit.rest.issues.listComments({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: pr.number,
+        per_page: 100
+      });
+
+      const markerComment = comments.find(comment => comment.body && comment.body.includes(marker));
+
+      if (markerComment) {
+        core.info(`Found comment on PR #${pr.number}, updating...`);
+
+        const updatedBody =
+          `${marker}\n` +
+          `## ✅ Release Published\n\n` +
+          `Release **${version}** has been published!\n\n` +
+          `🔗 **[View Release](${releaseUrl})**\n\n` +
+          `> _This comment was updated by the publish-github-action workflow._`;
+
+        await octokit.rest.issues.updateComment({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          comment_id: markerComment.id,
+          body: updatedBody
+        });
+
+        core.info(`✅ Updated PR comment on PR #${pr.number}`);
+        return;
+      }
+    }
+
+    core.info(`No PR comment found with marker for ${version}`);
+  } catch (error) {
+    core.warning(`Could not update PR comment: ${error.message}`);
+  }
+}
+
 /**
  * Create a commit using GitHub API for verified commits
  * @param {object} octokit - GitHub API client
@@ -170,17 +260,30 @@ export async function run() {
   try {
     const githubToken = core.getInput('github_token', { required: true });
     const githubApiUrl = core.getInput('github_api_url', { required: false });
+    const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
+
+    const context = github.context;
+    const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
+    const octokit = github.getOctokit(githubToken, opts);
+
+    // Handle release.published event - update the PR comment
+    if (context.eventName === 'release' && context.payload.action === 'published') {
+      if (draftReleasePrReminder !== 'false') {
+        await handleReleasePublished(octokit, context);
+      } else {
+        core.info('Skipping PR comment update (draft_release_pr_reminder is disabled)');
+      }
+      core.info('✅ Release published event handled!');
+      return;
+    }
+
+    // Continue with normal publish flow for push/workflow_dispatch events
     const npmPackageCommand = core.getInput('npm_package_command', { required: false });
     const commitNodeModules = core.getInput('commit_node_modules', { required: false });
     const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
     const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
-    const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
-
-    const context = github.context;
-    const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
-    const octokit = github.getOctokit(githubToken, opts);
 
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
@@ -389,6 +492,7 @@ export async function run() {
             const releaseUrl = release.data.html_url;
 
             const commentBody =
+              `<!-- publish-github-action:${version} -->\n` +
               `## 📦 Draft Release Created\n\n` +
               `A draft release **${version}** has been created for this PR.\n\n` +
               `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
