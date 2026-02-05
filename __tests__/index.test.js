@@ -1373,5 +1373,55 @@ describe('Publish GitHub Action', () => {
       expect(mockExec.exec).not.toHaveBeenCalled();
       expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
+
+    test('should handle missing release payload data gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      // Missing release.tag_name
+      mockGithubContext.payload = {
+        action: 'published',
+        release: {
+          html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3'
+        }
+      };
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'Release event missing expected payload data; cannot update PR comments.'
+      );
+      expect(mockOctokit.rest.pulls.list).not.toHaveBeenCalled();
+    });
+
+    test('should handle null release payload gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      // Null release
+      mockGithubContext.payload = {
+        action: 'published',
+        release: null
+      };
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'Release event missing expected payload data; cannot update PR comments.'
+      );
+      expect(mockOctokit.rest.pulls.list).not.toHaveBeenCalled();
+    });
   });
 });

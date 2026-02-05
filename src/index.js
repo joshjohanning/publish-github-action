@@ -19,9 +19,20 @@ const COMMENT_MARKER_PREFIX = '<!-- publish-github-action:';
  * @param {object} context - GitHub Actions context
  */
 async function handleReleasePublished(octokit, context) {
-  const release = context.payload.release;
+  // Defensive check for release payload structure
+  const release = context && context.payload ? context.payload.release : null;
+
+  if (!release || !release.tag_name || !release.html_url) {
+    core.warning('Release event missing expected payload data; cannot update PR comments.');
+    return;
+  }
+
   const version = release.tag_name;
   const releaseUrl = release.html_url;
+
+  // Note: The marker assumes tag_name matches the version format used when creating
+  // the initial comment (v${package.version}). If someone manually edits the tag name
+  // before publishing, the comment won't be found and updated.
   const marker = `${COMMENT_MARKER_PREFIX}${version} -->`;
 
   core.info(`Release published: ${version}`);
@@ -30,6 +41,15 @@ async function handleReleasePublished(octokit, context) {
   try {
     // Search for the comment in recent issues/PRs
     // We need to find PRs and check their comments for our marker
+    //
+    // Trade-offs documented here:
+    // - This implementation could make up to 21 API calls (1 for listing PRs + up to 20 for comments)
+    // - Search is limited to the 20 most recently updated closed PRs
+    // - For high-activity repos, the relevant PR might not be in this list if there's a delay
+    //   between PR merge and release publication
+    // - Alternative: GitHub Search API with query like:
+    //   `repo:owner/repo type:issue in:comments "publish-github-action:vX.Y.Z"`
+    //   However, search indexing can have delays, making this less reliable for immediate updates
     const { data: pulls } = await octokit.rest.pulls.list({
       owner: context.repo.owner,
       repo: context.repo.repo,
