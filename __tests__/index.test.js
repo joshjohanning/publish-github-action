@@ -19,10 +19,16 @@ const mockExec = {
 };
 
 // Mock the @actions/github module
+const mockGithubContext = {
+  eventName: 'push',
+  repo: { owner: 'test-owner', repo: 'test-repo' },
+  sha: 'abc123def456',
+  payload: {}
+};
+
 const mockGithub = {
-  context: {
-    repo: { owner: 'test-owner', repo: 'test-repo' },
-    sha: 'abc123def456'
+  get context() {
+    return mockGithubContext;
   },
   getOctokit: jest.fn()
 };
@@ -48,7 +54,12 @@ const mockOctokit = {
       createRef: jest.fn()
     },
     issues: {
-      createComment: jest.fn()
+      createComment: jest.fn(),
+      listComments: jest.fn(),
+      updateComment: jest.fn()
+    },
+    pulls: {
+      list: jest.fn()
     }
   },
   request: jest.fn()
@@ -89,6 +100,12 @@ const { default: run } = await import('../src/index.js');
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+
+    // Reset context to default push event
+    mockGithubContext.eventName = 'push';
+    mockGithubContext.repo = { owner: 'test-owner', repo: 'test-repo' };
+    mockGithubContext.sha = 'abc123def456';
+    mockGithubContext.payload = {};
 
     // Set up default mocks
     mockGithub.getOctokit.mockReturnValue(mockOctokit);
@@ -148,6 +165,11 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.git.deleteRef.mockResolvedValue({ data: {} });
     mockOctokit.rest.git.createTag.mockResolvedValue({ data: { sha: 'tag123' } });
     mockOctokit.rest.git.createRef.mockResolvedValue({ data: {} });
+
+    // Mock PR/comment API calls for release published flow
+    mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
+    mockOctokit.rest.issues.listComments.mockResolvedValue({ data: [] });
+    mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 789 } });
   });
 
   describe('Action execution', () => {
@@ -1177,6 +1199,179 @@ describe('Publish GitHub Action', () => {
       // Should warn but not fail
       expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+  });
+
+  describe('Release published event', () => {
+    beforeEach(() => {
+      // Set up context for release.published event
+      mockGithubContext.eventName = 'release';
+      mockGithubContext.payload = {
+        action: 'published',
+        release: {
+          tag_name: 'v1.2.3',
+          html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3'
+        }
+      };
+      mockGithubContext.repo = { owner: 'test-owner', repo: 'test-repo' };
+    });
+
+    test('should update PR comment when release is published', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z' }]
+      });
+
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [
+          {
+            id: 789,
+            body: '<!-- publish-github-action:v1.2.3 -->\n## 📦 Draft Release Created\n...'
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        state: 'closed',
+        sort: 'updated',
+        direction: 'desc',
+        per_page: 20
+      });
+
+      expect(mockOctokit.rest.issues.listComments).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 42,
+        per_page: 100
+      });
+
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        comment_id: 789,
+        body: expect.stringContaining('Release Published')
+      });
+
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Updated PR comment on PR #42');
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
+    });
+
+    test('should skip update when draft_release_pr_reminder is false', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'false'
+        };
+        return inputs[name] || '';
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.pulls.list).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping PR comment update (draft_release_pr_reminder is disabled)');
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
+    });
+
+    test('should handle no matching comment found', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z' }]
+      });
+
+      // Comment with different version marker
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [
+          {
+            id: 789,
+            body: '<!-- publish-github-action:v1.0.0 -->\n## 📦 Draft Release Created\n...'
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No PR comment found with marker for v1.2.3');
+    });
+
+    test('should handle no merged PRs gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      // No merged PRs
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 42, merged_at: null }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No PR comment found with marker for v1.2.3');
+    });
+
+    test('should handle API error gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.pulls.list.mockRejectedValue(new Error('API Error'));
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith('Could not update PR comment: API Error');
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
+    });
+
+    test('should not run normal publish flow on release event', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: '',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
+
+      await run();
+
+      // Should not run normal publish flow
+      expect(mockOctokit.rest.repos.listTags).not.toHaveBeenCalled();
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
   });
 });
