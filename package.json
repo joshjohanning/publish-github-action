@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
@@ -37,7 +37,7 @@
     "@actions/core": "^3.0.0",
     "@actions/exec": "^3.0.0",
     "@actions/github": "^9.0.0",
-    "semver": "^7.7.3"
+    "semver": "^7.7.4"
   },
   "devDependencies": {
     "@joshjohanning/make-coverage-badge-better": "^1.0.1",
