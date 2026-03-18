@@ -11,6 +11,10 @@ This action creates a release branch for your GitHub Actions which will be autom
 
 Based on the [tgymnich/publish-github-action](https://github.com/tgymnich/publish-github-action) action, but I wanted further customization and control over the release process (i.e.: adding `ncc` output and not committing `node_modules` directory).
 
+## What's new
+
+Please refer to the [release page](https://github.com/joshjohanning/publish-github-action/releases) for the latest release notes.
+
 ## Features
 
 - 🔐 **Verified Commits** - Uses GitHub API to create verified commits (when `commit_node_modules` is `false`)
@@ -78,10 +82,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: install ncc
         run: npm i -g @vercel/ncc
-      - uses: joshjohanning/publish-github-action@v2
+      - uses: joshjohanning/publish-github-action@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
