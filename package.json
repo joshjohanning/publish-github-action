@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "2.3.5",
+  "version": "3.0.0",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
@@ -8,7 +8,7 @@
     ".": "./dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "bundle": "npm run format:write && npm run package",
