@@ -82,7 +82,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: install ncc
         run: npm i -g @vercel/ncc
       - uses: joshjohanning/publish-github-action@v3
