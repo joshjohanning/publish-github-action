@@ -1208,6 +1208,15 @@ describe('Publish GitHub Action', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
+    test('should fall back to defaults for non-numeric retries and baseDelay', async () => {
+      const fn = jest.fn().mockResolvedValue('success');
+
+      const result = await retryWithBackoff(fn, { retries: 'foo', baseDelay: 'bar' });
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
     test('should retry on transient failure and succeed', async () => {
       const error = new Error('server error');
       error.status = 500;
