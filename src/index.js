@@ -221,7 +221,7 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
       {
         description: `Updating ref heads/${branchName}`,
         shouldRetry: error =>
-          isTransientError(error) || (error.status === 422 && /object does not exist/i.test(error.message))
+          isTransientError(error) || (error?.status === 422 && /object does not exist/i.test(error?.message))
       }
     );
     core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
