@@ -1255,6 +1255,9 @@ describe('Publish GitHub Action', () => {
       ).rejects.toThrow('server error');
 
       expect(fn).toHaveBeenCalledTimes(3); // initial + 2 retries
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'test op failed after 3 attempts (status: 502, code: unknown): server error'
+      );
 
       jest.useFakeTimers();
     });
@@ -1370,7 +1373,7 @@ describe('Publish GitHub Action', () => {
 
   describe('updateRef retry behavior', () => {
     test('should retry updateRef on transient Object does not exist error', async () => {
-      jest.useRealTimers();
+      jest.useFakeTimers();
 
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -1387,11 +1390,18 @@ describe('Publish GitHub Action', () => {
       transientError.status = 422;
       mockOctokit.rest.git.updateRef.mockRejectedValueOnce(transientError).mockResolvedValue({ data: {} });
 
-      await run();
+      const resultPromise = run();
+
+      // Advance past the first retry delay (1000ms)
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await resultPromise;
 
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+
+      jest.useRealTimers();
     });
 
     test('should not retry updateRef on non-retryable 422 error', async () => {

@@ -63,22 +63,28 @@ export async function retryWithBackoff(
     try {
       return await fn();
     } catch (error) {
-      const status = error && error.status;
-      const code = error && error.code;
+      const status = error?.status;
+      const code = error?.code;
+      const message = error?.message ?? String(error);
       const retryable = typeof shouldRetry === 'function' ? shouldRetry(error) : isTransientError(error);
 
-      if (!retryable || attempt === retries) {
-        if (!retryable) {
-          core.warning(
-            `${description} failed with non-retryable error (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${error.message}`
-          );
-        }
+      if (!retryable) {
+        core.warning(
+          `${description} failed with non-retryable error (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}`
+        );
+        throw error;
+      }
+
+      if (attempt === retries) {
+        core.warning(
+          `${description} failed after ${retries + 1} attempts (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}`
+        );
         throw error;
       }
 
       const delay = baseDelay * Math.pow(2, attempt);
       core.warning(
-        `${description} failed (attempt ${attempt + 1}/${retries + 1}, status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${error.message}. Retrying in ${delay}ms...`
+        `${description} failed (attempt ${attempt + 1}/${retries + 1}, status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}. Retrying in ${delay}ms...`
       );
       await new Promise(resolve => setTimeout(resolve, delay));
     }
