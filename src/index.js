@@ -59,6 +59,7 @@ export async function retryWithBackoff(
   fn,
   { retries = 3, baseDelay = 1000, description = 'operation', shouldRetry } = {}
 ) {
+  retries = Math.max(0, Math.floor(retries));
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();

@@ -1198,6 +1198,16 @@ describe('Publish GitHub Action', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
+    test('should execute once when retries is negative', async () => {
+      const error = new Error('server error');
+      error.status = 500;
+      const fn = jest.fn().mockRejectedValueOnce(error).mockResolvedValue('success');
+
+      await expect(retryWithBackoff(fn, { retries: -1, baseDelay: 100 })).rejects.toThrow('server error');
+
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
     test('should retry on transient failure and succeed', async () => {
       const error = new Error('server error');
       error.status = 500;
@@ -1240,26 +1250,23 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should throw after all retries exhausted', async () => {
-      jest.useRealTimers();
-
       const error = new Error('server error');
       error.status = 502;
       const fn = jest.fn().mockRejectedValue(error);
 
-      await expect(
-        retryWithBackoff(fn, {
-          retries: 2,
-          baseDelay: 10,
-          description: 'test op'
-        })
-      ).rejects.toThrow('server error');
+      const promise = retryWithBackoff(fn, {
+        retries: 2,
+        baseDelay: 10,
+        description: 'test op'
+      });
+
+      // Run assertion and timer advancement concurrently to avoid unhandled rejection
+      await Promise.all([expect(promise).rejects.toThrow('server error'), jest.advanceTimersByTimeAsync(30)]);
 
       expect(fn).toHaveBeenCalledTimes(3); // initial + 2 retries
       expect(mockCore.warning).toHaveBeenCalledWith(
         'test op failed after 3 attempts (status: 502, code: unknown): server error'
       );
-
-      jest.useFakeTimers();
     });
 
     test('should use exponential backoff delays', async () => {
