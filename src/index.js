@@ -11,25 +11,74 @@ import { join } from 'path';
 import * as semver from 'semver';
 
 /**
+ * Determine whether an error is likely transient and should be retried.
+ * Retries HTTP 429 / 5xx and common network errors; fails fast on auth/validation errors.
+ * @param {any} error - Error thrown by the operation
+ * @returns {boolean} Whether the error should be retried
+ */
+export function isTransientError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const status = error.status;
+  if (typeof status === 'number') {
+    if (status === 429) {
+      return true;
+    }
+    if (status >= 500 && status < 600) {
+      return true;
+    }
+    if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) {
+      return false;
+    }
+  }
+
+  const code = error.code;
+  if (typeof code === 'string') {
+    const transientNetworkCodes = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE'];
+    if (transientNetworkCodes.includes(code)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Retry an async function with exponential backoff
  * @param {Function} fn - Async function to retry
  * @param {object} options - Retry options
  * @param {number} options.retries - Maximum number of retries (default: 3)
  * @param {number} options.baseDelay - Base delay in ms (default: 1000)
  * @param {string} options.description - Description for logging
+ * @param {(error: any) => boolean} [options.shouldRetry] - Optional predicate to decide if an error is retryable
  * @returns {Promise<*>} Result of the function
  */
-export async function retryWithBackoff(fn, { retries = 3, baseDelay = 1000, description = 'operation' } = {}) {
+export async function retryWithBackoff(
+  fn,
+  { retries = 3, baseDelay = 1000, description = 'operation', shouldRetry } = {}
+) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await fn();
     } catch (error) {
-      if (attempt === retries) {
+      const status = error && error.status;
+      const code = error && error.code;
+      const retryable = typeof shouldRetry === 'function' ? shouldRetry(error) : isTransientError(error);
+
+      if (!retryable || attempt === retries) {
+        if (!retryable) {
+          core.warning(
+            `${description} failed with non-retryable error (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${error.message}`
+          );
+        }
         throw error;
       }
+
       const delay = baseDelay * Math.pow(2, attempt);
       core.warning(
-        `${description} failed (attempt ${attempt + 1}/${retries + 1}): ${error.message}. Retrying in ${delay}ms...`
+        `${description} failed (attempt ${attempt + 1}/${retries + 1}, status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${error.message}. Retrying in ${delay}ms...`
       );
       await new Promise(resolve => setTimeout(resolve, delay));
     }
@@ -147,6 +196,8 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
     core.info(`Created new verified commit: ${newCommit.sha}`);
 
     // 6. Update branch reference with new commit (retry for transient failures)
+    // The "Object does not exist" error (422) can occur transiently due to
+    // eventual consistency after creating the commit, so we include it as retryable
     await retryWithBackoff(
       () =>
         octokit.rest.git.updateRef({
@@ -155,7 +206,11 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
           ref: `heads/${branchName}`,
           sha: newCommit.sha
         }),
-      { description: `Updating ref heads/${branchName}` }
+      {
+        description: `Updating ref heads/${branchName}`,
+        shouldRetry: error =>
+          isTransientError(error) || (error.status === 422 && /object does not exist/i.test(error.message))
+      }
     );
     core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
 

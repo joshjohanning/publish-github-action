@@ -84,7 +84,7 @@ jest.unstable_mockModule('semver', () => ({
 }));
 
 // Import the main module after mocking
-const { default: run, retryWithBackoff } = await import('../src/index.js');
+const { default: run, retryWithBackoff, isTransientError } = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
@@ -1198,8 +1198,10 @@ describe('Publish GitHub Action', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
-    test('should retry on failure and succeed', async () => {
-      const fn = jest.fn().mockRejectedValueOnce(new Error('transient error')).mockResolvedValue('success');
+    test('should retry on transient failure and succeed', async () => {
+      const error = new Error('server error');
+      error.status = 500;
+      const fn = jest.fn().mockRejectedValueOnce(error).mockResolvedValue('success');
 
       const promise = retryWithBackoff(fn, {
         retries: 3,
@@ -1207,7 +1209,6 @@ describe('Publish GitHub Action', () => {
         description: 'test op'
       });
 
-      // Advance past the first retry delay (100ms * 2^0 = 100ms)
       await jest.advanceTimersByTimeAsync(100);
 
       const result = await promise;
@@ -1215,46 +1216,55 @@ describe('Publish GitHub Action', () => {
       expect(result).toBe('success');
       expect(fn).toHaveBeenCalledTimes(2);
       expect(mockCore.warning).toHaveBeenCalledWith(
-        'test op failed (attempt 1/4): transient error. Retrying in 100ms...'
+        'test op failed (attempt 1/4, status: 500, code: unknown): server error. Retrying in 100ms...'
+      );
+    });
+
+    test('should fail immediately on non-retryable error', async () => {
+      const error = new Error('not found');
+      error.status = 404;
+      const fn = jest.fn().mockRejectedValue(error);
+
+      await expect(
+        retryWithBackoff(fn, {
+          retries: 3,
+          baseDelay: 100,
+          description: 'test op'
+        })
+      ).rejects.toThrow('not found');
+
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'test op failed with non-retryable error (status: 404, code: unknown): not found'
       );
     });
 
     test('should throw after all retries exhausted', async () => {
-      const error = new Error('persistent error');
+      jest.useRealTimers();
+
+      const error = new Error('server error');
+      error.status = 502;
       const fn = jest.fn().mockRejectedValue(error);
 
-      let rejected;
-      // eslint-disable-next-line no-async-promise-executor
-      const promise = new Promise(async resolve => {
-        try {
-          await retryWithBackoff(fn, {
-            retries: 2,
-            baseDelay: 100,
-            description: 'test op'
-          });
-        } catch (e) {
-          rejected = e;
-        }
-        resolve();
-      });
+      await expect(
+        retryWithBackoff(fn, {
+          retries: 2,
+          baseDelay: 10,
+          description: 'test op'
+        })
+      ).rejects.toThrow('server error');
 
-      // First retry delay: 100ms
-      await jest.advanceTimersByTimeAsync(100);
-      // Second retry delay: 200ms
-      await jest.advanceTimersByTimeAsync(200);
-
-      await promise;
-
-      expect(rejected).toBe(error);
       expect(fn).toHaveBeenCalledTimes(3); // initial + 2 retries
+
+      jest.useFakeTimers();
     });
 
     test('should use exponential backoff delays', async () => {
-      const fn = jest
-        .fn()
-        .mockRejectedValueOnce(new Error('fail 1'))
-        .mockRejectedValueOnce(new Error('fail 2'))
-        .mockResolvedValue('success');
+      const error1 = new Error('fail 1');
+      error1.status = 503;
+      const error2 = new Error('fail 2');
+      error2.status = 503;
+      const fn = jest.fn().mockRejectedValueOnce(error1).mockRejectedValueOnce(error2).mockResolvedValue('success');
 
       const promise = retryWithBackoff(fn, {
         retries: 3,
@@ -1262,22 +1272,104 @@ describe('Publish GitHub Action', () => {
         description: 'backoff test'
       });
 
-      // First retry: 1000ms * 2^0 = 1000ms
       await jest.advanceTimersByTimeAsync(1000);
-      // Second retry: 1000ms * 2^1 = 2000ms
       await jest.advanceTimersByTimeAsync(2000);
 
       const result = await promise;
 
       expect(result).toBe('success');
       expect(fn).toHaveBeenCalledTimes(3);
-      expect(mockCore.warning).toHaveBeenCalledWith('backoff test failed (attempt 1/4): fail 1. Retrying in 1000ms...');
-      expect(mockCore.warning).toHaveBeenCalledWith('backoff test failed (attempt 2/4): fail 2. Retrying in 2000ms...');
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'backoff test failed (attempt 1/4, status: 503, code: unknown): fail 1. Retrying in 1000ms...'
+      );
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'backoff test failed (attempt 2/4, status: 503, code: unknown): fail 2. Retrying in 2000ms...'
+      );
+    });
+
+    test('should retry network errors', async () => {
+      const error = new Error('connection reset');
+      error.code = 'ECONNRESET';
+      const fn = jest.fn().mockRejectedValueOnce(error).mockResolvedValue('success');
+
+      const promise = retryWithBackoff(fn, {
+        retries: 3,
+        baseDelay: 100,
+        description: 'network test'
+      });
+
+      await jest.advanceTimersByTimeAsync(100);
+
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
+    test('should use custom shouldRetry predicate', async () => {
+      const error = new Error('Object does not exist');
+      error.status = 422;
+      const fn = jest.fn().mockRejectedValueOnce(error).mockResolvedValue('success');
+
+      const promise = retryWithBackoff(fn, {
+        retries: 3,
+        baseDelay: 100,
+        description: 'custom predicate test',
+        shouldRetry: e => e.status === 422 && /object does not exist/i.test(e.message)
+      });
+
+      await jest.advanceTimersByTimeAsync(100);
+
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('isTransientError', () => {
+    test('should return true for 429 rate limit', () => {
+      const error = new Error('rate limited');
+      error.status = 429;
+      expect(isTransientError(error)).toBe(true);
+    });
+
+    test('should return true for 5xx server errors', () => {
+      for (const status of [500, 502, 503, 504]) {
+        const error = new Error('server error');
+        error.status = status;
+        expect(isTransientError(error)).toBe(true);
+      }
+    });
+
+    test('should return false for client errors', () => {
+      for (const status of [400, 401, 403, 404, 422]) {
+        const error = new Error('client error');
+        error.status = status;
+        expect(isTransientError(error)).toBe(false);
+      }
+    });
+
+    test('should return true for transient network codes', () => {
+      for (const code of ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN']) {
+        const error = new Error('network error');
+        error.code = code;
+        expect(isTransientError(error)).toBe(true);
+      }
+    });
+
+    test('should return false for null/undefined', () => {
+      expect(isTransientError(null)).toBe(false);
+      expect(isTransientError(undefined)).toBe(false);
+    });
+
+    test('should return false for unknown errors', () => {
+      expect(isTransientError(new Error('unknown'))).toBe(false);
     });
   });
 
   describe('updateRef retry behavior', () => {
-    test('should retry updateRef on transient failure', async () => {
+    test('should retry updateRef on transient Object does not exist error', async () => {
       jest.useRealTimers();
 
       mockCore.getInput.mockImplementation(name => {
@@ -1290,16 +1382,40 @@ describe('Publish GitHub Action', () => {
         return inputs[name] || '';
       });
 
-      // First call fails, second succeeds
-      mockOctokit.rest.git.updateRef
-        .mockRejectedValueOnce(new Error('Object does not exist'))
-        .mockResolvedValue({ data: {} });
+      // Simulate the 422 "Object does not exist" transient error
+      const transientError = new Error('Object does not exist');
+      transientError.status = 422;
+      mockOctokit.rest.git.updateRef.mockRejectedValueOnce(transientError).mockResolvedValue({ data: {} });
 
       await run();
 
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should not retry updateRef on non-retryable 422 error', async () => {
+      jest.useRealTimers();
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      const validationError = new Error('Validation Failed');
+      validationError.status = 422;
+      mockOctokit.rest.git.updateRef.mockRejectedValue(validationError);
+
+      await run();
+
+      // Should not retry — "Validation Failed" doesn't match the predicate
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(1);
+      expect(mockCore.setFailed).toHaveBeenCalledWith('Validation Failed');
     });
 
     test('should fail after all updateRef retries exhausted', async () => {
@@ -1315,20 +1431,18 @@ describe('Publish GitHub Action', () => {
         return inputs[name] || '';
       });
 
-      mockOctokit.rest.git.updateRef.mockRejectedValue(new Error('Object does not exist'));
+      const transientError = new Error('Object does not exist');
+      transientError.status = 422;
+      mockOctokit.rest.git.updateRef.mockRejectedValue(transientError);
 
-      // eslint-disable-next-line no-async-promise-executor
-      const promise = new Promise(async resolve => {
-        await run();
-        resolve();
-      });
+      const resultPromise = run();
 
       // Advance past all retry delays (1000, 2000, 4000ms)
       await jest.advanceTimersByTimeAsync(1000);
       await jest.advanceTimersByTimeAsync(2000);
       await jest.advanceTimersByTimeAsync(4000);
 
-      await promise;
+      await resultPromise;
 
       // initial + 3 retries = 4 calls
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(4);
