@@ -1379,9 +1379,15 @@ describe('Publish GitHub Action', () => {
   });
 
   describe('updateRef retry behavior', () => {
-    test('should retry updateRef on transient Object does not exist error', async () => {
+    beforeEach(() => {
       jest.useFakeTimers();
+    });
 
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('should retry updateRef on transient Object does not exist error', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1407,13 +1413,9 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
-
-      jest.useRealTimers();
     });
 
     test('should not retry updateRef on non-retryable 422 error', async () => {
-      jest.useRealTimers();
-
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1436,8 +1438,6 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should fail after all updateRef retries exhausted', async () => {
-      jest.useFakeTimers();
-
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1464,8 +1464,6 @@ describe('Publish GitHub Action', () => {
       // initial + 3 retries = 4 calls
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(4);
       expect(mockCore.setFailed).toHaveBeenCalledWith('Object does not exist');
-
-      jest.useRealTimers();
     });
   });
 });
