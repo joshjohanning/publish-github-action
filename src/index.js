@@ -10,6 +10,15 @@ import { readFileSync, rmSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import * as semver from 'semver';
 
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'ECONNREFUSED',
+  'EPIPE'
+]);
+
 /**
  * Determine whether an error is likely transient and should be retried.
  * Retries HTTP 429 / 5xx and common network errors; fails fast on auth/validation errors.
@@ -36,8 +45,7 @@ export function isTransientError(error) {
 
   const code = error.code;
   if (typeof code === 'string') {
-    const transientNetworkCodes = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED', 'EPIPE'];
-    if (transientNetworkCodes.includes(code)) {
+    if (TRANSIENT_NETWORK_CODES.has(code)) {
       return true;
     }
   }
@@ -48,10 +56,10 @@ export function isTransientError(error) {
 /**
  * Retry an async function with exponential backoff
  * @param {Function} fn - Async function to retry
- * @param {object} options - Retry options
- * @param {number} options.retries - Maximum number of retries (default: 3)
- * @param {number} options.baseDelay - Base delay in ms (default: 1000)
- * @param {string} options.description - Description for logging
+ * @param {object} [options] - Retry options
+ * @param {number} [options.retries=3] - Maximum number of retries
+ * @param {number} [options.baseDelay=1000] - Base delay in ms
+ * @param {string} [options.description='operation'] - Description for logging
  * @param {(error: any) => boolean} [options.shouldRetry] - Optional predicate to decide if an error is retryable
  * @returns {Promise<*>} Result of the function
  */
