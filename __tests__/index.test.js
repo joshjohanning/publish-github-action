@@ -84,7 +84,7 @@ jest.unstable_mockModule('semver', () => ({
 }));
 
 // Import the main module after mocking
-const { default: run } = await import('../src/index.js');
+const { default: run, retryWithBackoff } = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
@@ -1177,6 +1177,164 @@ describe('Publish GitHub Action', () => {
       // Should warn but not fail
       expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+  });
+
+  describe('retryWithBackoff', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('should return result on first success', async () => {
+      const fn = jest.fn().mockResolvedValue('success');
+
+      const result = await retryWithBackoff(fn, { retries: 3, baseDelay: 100 });
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    test('should retry on failure and succeed', async () => {
+      const fn = jest.fn().mockRejectedValueOnce(new Error('transient error')).mockResolvedValue('success');
+
+      const promise = retryWithBackoff(fn, {
+        retries: 3,
+        baseDelay: 100,
+        description: 'test op'
+      });
+
+      // Advance past the first retry delay (100ms * 2^0 = 100ms)
+      await jest.advanceTimersByTimeAsync(100);
+
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(2);
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'test op failed (attempt 1/4): transient error. Retrying in 100ms...'
+      );
+    });
+
+    test('should throw after all retries exhausted', async () => {
+      const error = new Error('persistent error');
+      const fn = jest.fn().mockRejectedValue(error);
+
+      let rejected;
+      // eslint-disable-next-line no-async-promise-executor
+      const promise = new Promise(async resolve => {
+        try {
+          await retryWithBackoff(fn, {
+            retries: 2,
+            baseDelay: 100,
+            description: 'test op'
+          });
+        } catch (e) {
+          rejected = e;
+        }
+        resolve();
+      });
+
+      // First retry delay: 100ms
+      await jest.advanceTimersByTimeAsync(100);
+      // Second retry delay: 200ms
+      await jest.advanceTimersByTimeAsync(200);
+
+      await promise;
+
+      expect(rejected).toBe(error);
+      expect(fn).toHaveBeenCalledTimes(3); // initial + 2 retries
+    });
+
+    test('should use exponential backoff delays', async () => {
+      const fn = jest
+        .fn()
+        .mockRejectedValueOnce(new Error('fail 1'))
+        .mockRejectedValueOnce(new Error('fail 2'))
+        .mockResolvedValue('success');
+
+      const promise = retryWithBackoff(fn, {
+        retries: 3,
+        baseDelay: 1000,
+        description: 'backoff test'
+      });
+
+      // First retry: 1000ms * 2^0 = 1000ms
+      await jest.advanceTimersByTimeAsync(1000);
+      // Second retry: 1000ms * 2^1 = 2000ms
+      await jest.advanceTimersByTimeAsync(2000);
+
+      const result = await promise;
+
+      expect(result).toBe('success');
+      expect(fn).toHaveBeenCalledTimes(3);
+      expect(mockCore.warning).toHaveBeenCalledWith('backoff test failed (attempt 1/4): fail 1. Retrying in 1000ms...');
+      expect(mockCore.warning).toHaveBeenCalledWith('backoff test failed (attempt 2/4): fail 2. Retrying in 2000ms...');
+    });
+  });
+
+  describe('updateRef retry behavior', () => {
+    test('should retry updateRef on transient failure', async () => {
+      jest.useRealTimers();
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      // First call fails, second succeeds
+      mockOctokit.rest.git.updateRef
+        .mockRejectedValueOnce(new Error('Object does not exist'))
+        .mockResolvedValue({ data: {} });
+
+      await run();
+
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should fail after all updateRef retries exhausted', async () => {
+      jest.useFakeTimers();
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package'
+        };
+        return inputs[name] || '';
+      });
+
+      mockOctokit.rest.git.updateRef.mockRejectedValue(new Error('Object does not exist'));
+
+      // eslint-disable-next-line no-async-promise-executor
+      const promise = new Promise(async resolve => {
+        await run();
+        resolve();
+      });
+
+      // Advance past all retry delays (1000, 2000, 4000ms)
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(2000);
+      await jest.advanceTimersByTimeAsync(4000);
+
+      await promise;
+
+      // initial + 3 retries = 4 calls
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(4);
+      expect(mockCore.setFailed).toHaveBeenCalledWith('Object does not exist');
+
+      jest.useRealTimers();
     });
   });
 });

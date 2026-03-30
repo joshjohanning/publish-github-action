@@ -11,6 +11,32 @@ import { join } from 'path';
 import * as semver from 'semver';
 
 /**
+ * Retry an async function with exponential backoff
+ * @param {Function} fn - Async function to retry
+ * @param {object} options - Retry options
+ * @param {number} options.retries - Maximum number of retries (default: 3)
+ * @param {number} options.baseDelay - Base delay in ms (default: 1000)
+ * @param {string} options.description - Description for logging
+ * @returns {Promise<*>} Result of the function
+ */
+export async function retryWithBackoff(fn, { retries = 3, baseDelay = 1000, description = 'operation' } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (attempt === retries) {
+        throw error;
+      }
+      const delay = baseDelay * Math.pow(2, attempt);
+      core.warning(
+        `${description} failed (attempt ${attempt + 1}/${retries + 1}): ${error.message}. Retrying in ${delay}ms...`
+      );
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
  * Create a commit using GitHub API for verified commits
  * @param {object} octokit - GitHub API client
  * @param {object} context - GitHub Actions context
@@ -120,13 +146,17 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
     });
     core.info(`Created new verified commit: ${newCommit.sha}`);
 
-    // 6. Update branch reference with new commit
-    await octokit.rest.git.updateRef({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      ref: `heads/${branchName}`,
-      sha: newCommit.sha
-    });
+    // 6. Update branch reference with new commit (retry for transient failures)
+    await retryWithBackoff(
+      () =>
+        octokit.rest.git.updateRef({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          ref: `heads/${branchName}`,
+          sha: newCommit.sha
+        }),
+      { description: `Updating ref heads/${branchName}` }
+    );
     core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
 
     return newCommit.sha;
