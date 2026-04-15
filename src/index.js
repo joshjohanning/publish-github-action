@@ -418,13 +418,13 @@ export async function run() {
     let previousTag;
 
     try {
-      const releases = await octokit.rest.repos.listReleases({
+      const releases = await octokit.paginate(octokit.rest.repos.listReleases, {
         owner: context.repo.owner,
         repo: context.repo.repo,
         per_page: 100
       });
 
-      const candidates = releases.data
+      const candidates = releases
         .map(r => r.tag_name)
         .filter(tag => tag && semver.valid(tag) && semver.lt(tag, version));
 

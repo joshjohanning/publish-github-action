@@ -51,6 +51,7 @@ const mockOctokit = {
       createComment: jest.fn()
     }
   },
+  paginate: jest.fn(),
   request: jest.fn()
 };
 
@@ -62,29 +63,14 @@ const mockFs = {
   rmSync: jest.fn()
 };
 
-// Mock semver module
+// Import real semver for pure comparison functions used in release baseline selection
+const realSemver = await import('semver');
+
+// Mock semver module — only mock major/minor which need controlled return values;
+// valid/lt/rcompare use real implementations for accurate test behavior
 const mockSemver = {
   major: jest.fn(),
-  minor: jest.fn(),
-  valid: jest.fn(v => {
-    if (!v) return null;
-    const m = v.match(/^v?(\d+\.\d+\.\d+)$/);
-    return m ? m[1] : null;
-  }),
-  lt: jest.fn((a, b) => {
-    const p = s => s.replace(/^v/, '').split('.').map(Number);
-    const [a0, a1, a2] = p(a);
-    const [b0, b1, b2] = p(b);
-    return a0 < b0 || (a0 === b0 && (a1 < b1 || (a1 === b1 && a2 < b2)));
-  }),
-  rcompare: jest.fn((a, b) => {
-    const p = s => s.replace(/^v/, '').split('.').map(Number);
-    const [a0, a1, a2] = p(a);
-    const [b0, b1, b2] = p(b);
-    if (a0 !== b0) return b0 - a0;
-    if (a1 !== b1) return b1 - a1;
-    return b2 - a2;
-  })
+  minor: jest.fn()
 };
 
 // Mock the modules before importing the main module
@@ -100,9 +86,9 @@ jest.unstable_mockModule('fs', () => ({
 jest.unstable_mockModule('semver', () => ({
   major: mockSemver.major,
   minor: mockSemver.minor,
-  valid: mockSemver.valid,
-  lt: mockSemver.lt,
-  rcompare: mockSemver.rcompare
+  valid: realSemver.default.valid,
+  lt: realSemver.default.lt,
+  rcompare: realSemver.default.rcompare
 }));
 
 // Import the main module after mocking
@@ -152,7 +138,7 @@ describe('Publish GitHub Action', () => {
 
     // Mock GitHub API calls
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
-    mockOctokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
+    mockOctokit.paginate.mockResolvedValue([]);
     mockOctokit.rest.repos.createRelease.mockResolvedValue({
       data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
     });
@@ -314,9 +300,7 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should generate release notes with previous tag', async () => {
-      mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
-      });
+      mockOctokit.paginate.mockResolvedValue([{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]);
 
       await run();
 
@@ -367,7 +351,7 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should handle previous releases fetch failure', async () => {
-      mockOctokit.rest.repos.listReleases.mockRejectedValue(new Error('API Error'));
+      mockOctokit.paginate.mockRejectedValue(new Error('API Error'));
 
       await run();
 
@@ -380,9 +364,11 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should skip non-semver release tags when finding previous tag', async () => {
-      mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'nightly-2026-04-15' }, { tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
-      });
+      mockOctokit.paginate.mockResolvedValue([
+        { tag_name: 'nightly-2026-04-15' },
+        { tag_name: 'v1.2.2' },
+        { tag_name: 'v1.2.1' }
+      ]);
 
       await run();
 
@@ -396,9 +382,7 @@ describe('Publish GitHub Action', () => {
 
     test('should pick highest version less than current, not chronologically newest', async () => {
       // v2.0.6 was created after v4.0.0 (hotpatch), but we're publishing v4.0.1
-      mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v2.0.6' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.5' }]
-      });
+      mockOctokit.paginate.mockResolvedValue([{ tag_name: 'v2.0.6' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.5' }]);
 
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -432,9 +416,12 @@ describe('Publish GitHub Action', () => {
 
     test('should select correct baseline for backport releases', async () => {
       // Publishing v2.0.7 when v4.0.1 and v2.0.6 exist — should pick v2.0.6
-      mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v4.0.1' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.6' }, { tag_name: 'v2.0.5' }]
-      });
+      mockOctokit.paginate.mockResolvedValue([
+        { tag_name: 'v4.0.1' },
+        { tag_name: 'v4.0.0' },
+        { tag_name: 'v2.0.6' },
+        { tag_name: 'v2.0.5' }
+      ]);
 
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
