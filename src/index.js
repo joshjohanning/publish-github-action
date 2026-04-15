@@ -286,8 +286,8 @@ export function parseIssueReferences(text, owner, repo) {
   const issues = new Set();
   let match;
 
-  // Track issue numbers that belong to a different repo via owner/repo#N
-  const crossRepoExclusions = new Set();
+  // Track positions of #N that are part of cross-repo references
+  const crossRepoHashPositions = new Set();
 
   // Match owner/repo#N cross-repo references using negated classes to avoid backtracking
   const crossRepoPattern = /([^\s/#]+)\/([^\s/#]+)#(\d+)/g;
@@ -295,19 +295,19 @@ export function parseIssueReferences(text, owner, repo) {
     const refOwner = match[1];
     const refRepo = match[2];
     const issueNum = parseInt(match[3], 10);
+    // Record the position of the '#' in this cross-repo match
+    const hashPos = match.index + match[0].lastIndexOf('#');
+    crossRepoHashPositions.add(hashPos);
     if (refOwner === owner && refRepo === repo) {
       issues.add(issueNum);
-    } else {
-      crossRepoExclusions.add(issueNum);
     }
   }
 
-  // Match standalone #N references (simple pattern, no backtracking risk)
+  // Match standalone #N references (skip those already handled as cross-repo)
   const hashRefPattern = /#(\d+)/g;
   while ((match = hashRefPattern.exec(text)) !== null) {
-    const issueNum = parseInt(match[1], 10);
-    if (!crossRepoExclusions.has(issueNum)) {
-      issues.add(issueNum);
+    if (!crossRepoHashPositions.has(match.index)) {
+      issues.add(parseInt(match[1], 10));
     }
   }
 

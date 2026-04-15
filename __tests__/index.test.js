@@ -1327,6 +1327,13 @@ describe('Publish GitHub Action', () => {
       expect(result).not.toContain(42);
       expect(result).not.toContain(43);
     });
+
+    test('should not exclude same-numbered issue when cross-repo ref uses same number', () => {
+      const text = 'Fixes other-owner/other-repo#42 and also fixes #42';
+      const result = parseIssueReferences(text, 'test-owner', 'test-repo');
+      // Standalone #42 should still be included even though other-owner/other-repo#42 exists
+      expect(result).toEqual([42]);
+    });
   });
 
   describe('Comment on linked issues', () => {
