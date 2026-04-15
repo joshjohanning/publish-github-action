@@ -427,8 +427,9 @@ export async function run() {
       if (latestRelease.tag_name && SEMVER_TAG_PATTERN.test(latestRelease.tag_name)) {
         previousTag = latestRelease.tag_name;
       }
-    } catch {
+    } catch (error) {
       // No latest release found (e.g. first release) — fall back to listReleases
+      core.info(`Could not fetch latest release, falling back to listReleases: ${error.message}`);
       try {
         const releases = await octokit.rest.repos.listReleases({
           owner: context.repo.owner,
@@ -446,8 +447,8 @@ export async function run() {
             previousTag = semverRelease.tag_name;
           }
         }
-      } catch (error) {
-        core.info(`Could not fetch previous releases: ${error.message}`);
+      } catch (listError) {
+        core.info(`Could not fetch previous releases: ${listError.message}`);
       }
     }
 
