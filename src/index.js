@@ -426,10 +426,15 @@ export async function run() {
 
       if (latestRelease.tag_name && SEMVER_TAG_PATTERN.test(latestRelease.tag_name)) {
         previousTag = latestRelease.tag_name;
+      } else {
+        core.info('Latest release tag is missing or not semver, falling back to listReleases');
       }
     } catch (error) {
-      // No latest release found (e.g. first release) — fall back to listReleases
+      // If fetching the latest release fails for any reason, fall back to listReleases.
       core.info(`Could not fetch latest release, falling back to listReleases: ${error.message}`);
+    }
+
+    if (!previousTag) {
       try {
         const releases = await octokit.rest.repos.listReleases({
           owner: context.repo.owner,

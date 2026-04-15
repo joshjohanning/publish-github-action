@@ -376,6 +376,24 @@ describe('Publish GitHub Action', () => {
       });
     });
 
+    test('should fall back to listReleases when latest release tag is not semver', async () => {
+      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
+        data: { tag_name: 'nightly-2026-04-15' }
+      });
+      mockOctokit.rest.repos.listReleases.mockResolvedValue({
+        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
+      });
+
+      await run();
+
+      expect(mockOctokit.request).toHaveBeenCalledWith('POST /repos/{owner}/{repo}/releases/generate-notes', {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        tag_name: 'v1.2.3',
+        previous_tag_name: 'v1.2.2'
+      });
+    });
+
     test('should use latest release instead of chronologically newest release', async () => {
       // Simulate hotpatch scenario: v2.0.6 created after v4.0.0, but v4.0.0 is "latest"
       mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
