@@ -411,30 +411,44 @@ export async function run() {
       }
     }
 
-    // Find the previous semver release to use as baseline for release notes
+    // Find the previous release to use as baseline for release notes.
+    // Use GitHub's "latest" release endpoint which respects the semantic latest
+    // designation rather than chronological creation order. This correctly handles
+    // hotpatches published to older version lines (e.g. v2.0.6 published after v4.0.0).
     const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
     let previousTag;
 
     try {
-      const releases = await octokit.rest.repos.listReleases({
+      const { data: latestRelease } = await octokit.rest.repos.getLatestRelease({
         owner: context.repo.owner,
-        repo: context.repo.repo,
-        per_page: 100
+        repo: context.repo.repo
       });
 
-      if (releases.data.length > 0) {
-        // Find the most recent release with a semver tag (vX.Y.Z pattern)
-        const semverRelease = releases.data.find(release => {
-          const tagName = release.tag_name;
-          return tagName && SEMVER_TAG_PATTERN.test(tagName);
+      if (latestRelease.tag_name && SEMVER_TAG_PATTERN.test(latestRelease.tag_name)) {
+        previousTag = latestRelease.tag_name;
+      }
+    } catch {
+      // No latest release found (e.g. first release) — fall back to listReleases
+      try {
+        const releases = await octokit.rest.repos.listReleases({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          per_page: 100
         });
 
-        if (semverRelease) {
-          previousTag = semverRelease.tag_name;
+        if (releases.data.length > 0) {
+          const semverRelease = releases.data.find(release => {
+            const tagName = release.tag_name;
+            return tagName && SEMVER_TAG_PATTERN.test(tagName);
+          });
+
+          if (semverRelease) {
+            previousTag = semverRelease.tag_name;
+          }
         }
+      } catch (error) {
+        core.info(`Could not fetch previous releases: ${error.message}`);
       }
-    } catch (error) {
-      core.info(`Could not fetch previous releases: ${error.message}`);
     }
 
     // Generate release notes

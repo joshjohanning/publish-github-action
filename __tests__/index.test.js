@@ -32,6 +32,7 @@ const mockOctokit = {
   rest: {
     repos: {
       listTags: jest.fn(),
+      getLatestRelease: jest.fn(),
       listReleases: jest.fn(),
       createRelease: jest.fn(),
       listPullRequestsAssociatedWithCommit: jest.fn()
@@ -130,6 +131,7 @@ describe('Publish GitHub Action', () => {
 
     // Mock GitHub API calls
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
+    mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('Not Found'));
     mockOctokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
     mockOctokit.rest.repos.createRelease.mockResolvedValue({
       data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
@@ -292,8 +294,8 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should generate release notes with previous tag', async () => {
-      mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
+      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
+        data: { tag_name: 'v1.2.2' }
       });
 
       await run();
@@ -345,6 +347,7 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should handle previous releases fetch failure', async () => {
+      mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('API Error'));
       mockOctokit.rest.repos.listReleases.mockRejectedValue(new Error('API Error'));
 
       await run();
@@ -355,6 +358,58 @@ describe('Publish GitHub Action', () => {
         repo: 'test-repo',
         tag_name: 'v1.2.3'
       });
+    });
+
+    test('should fall back to listReleases when getLatestRelease fails', async () => {
+      mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('Not Found'));
+      mockOctokit.rest.repos.listReleases.mockResolvedValue({
+        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
+      });
+
+      await run();
+
+      expect(mockOctokit.request).toHaveBeenCalledWith('POST /repos/{owner}/{repo}/releases/generate-notes', {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        tag_name: 'v1.2.3',
+        previous_tag_name: 'v1.2.2'
+      });
+    });
+
+    test('should use latest release instead of chronologically newest release', async () => {
+      // Simulate hotpatch scenario: v2.0.6 created after v4.0.0, but v4.0.0 is "latest"
+      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
+        data: { tag_name: 'v4.0.0' }
+      });
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://api.github.com',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          publish_minor_version: 'false',
+          publish_release_branch: 'false',
+          create_release_as_draft: 'false',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ name: 'test-action', version: '4.0.1' }));
+      mockSemver.major.mockReturnValue(4);
+      mockSemver.minor.mockReturnValue(0);
+
+      await run();
+
+      // Should use v4.0.0 (the "latest" release) not v2.0.6 (the most recently created)
+      expect(mockOctokit.request).toHaveBeenCalledWith(
+        'POST /repos/{owner}/{repo}/releases/generate-notes',
+        expect.objectContaining({
+          previous_tag_name: 'v4.0.0'
+        })
+      );
     });
 
     test('should create release as draft when create_release_as_draft is true', async () => {
