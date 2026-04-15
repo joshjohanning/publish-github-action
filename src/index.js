@@ -290,7 +290,7 @@ export function parseIssueReferences(text, owner, repo) {
   const crossRepoExclusions = new Set();
 
   // Match owner/repo#N cross-repo references (/ delimiter prevents backtracking)
-  const crossRepoPattern = /(\w+(?:-\w+)*)\/(\w+(?:[.-]\w+)*)#(\d+)/g;
+  const crossRepoPattern = /([\w-]+)\/([\w.-]+)#(\d+)/g;
   while ((match = crossRepoPattern.exec(text)) !== null) {
     const refOwner = match[1];
     const refRepo = match[2];
