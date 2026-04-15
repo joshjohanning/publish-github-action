@@ -32,7 +32,6 @@ const mockOctokit = {
   rest: {
     repos: {
       listTags: jest.fn(),
-      getLatestRelease: jest.fn(),
       listReleases: jest.fn(),
       createRelease: jest.fn(),
       listPullRequestsAssociatedWithCommit: jest.fn()
@@ -66,7 +65,26 @@ const mockFs = {
 // Mock semver module
 const mockSemver = {
   major: jest.fn(),
-  minor: jest.fn()
+  minor: jest.fn(),
+  valid: jest.fn(v => {
+    if (!v) return null;
+    const m = v.match(/^v?(\d+\.\d+\.\d+)$/);
+    return m ? m[1] : null;
+  }),
+  lt: jest.fn((a, b) => {
+    const p = s => s.replace(/^v/, '').split('.').map(Number);
+    const [a0, a1, a2] = p(a);
+    const [b0, b1, b2] = p(b);
+    return a0 < b0 || (a0 === b0 && (a1 < b1 || (a1 === b1 && a2 < b2)));
+  }),
+  rcompare: jest.fn((a, b) => {
+    const p = s => s.replace(/^v/, '').split('.').map(Number);
+    const [a0, a1, a2] = p(a);
+    const [b0, b1, b2] = p(b);
+    if (a0 !== b0) return b0 - a0;
+    if (a1 !== b1) return b1 - a1;
+    return b2 - a2;
+  })
 };
 
 // Mock the modules before importing the main module
@@ -81,7 +99,10 @@ jest.unstable_mockModule('fs', () => ({
 }));
 jest.unstable_mockModule('semver', () => ({
   major: mockSemver.major,
-  minor: mockSemver.minor
+  minor: mockSemver.minor,
+  valid: mockSemver.valid,
+  lt: mockSemver.lt,
+  rcompare: mockSemver.rcompare
 }));
 
 // Import the main module after mocking
@@ -131,7 +152,6 @@ describe('Publish GitHub Action', () => {
 
     // Mock GitHub API calls
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
-    mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('Not Found'));
     mockOctokit.rest.repos.listReleases.mockResolvedValue({ data: [] });
     mockOctokit.rest.repos.createRelease.mockResolvedValue({
       data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
@@ -294,8 +314,8 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should generate release notes with previous tag', async () => {
-      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
-        data: { tag_name: 'v1.2.2' }
+      mockOctokit.rest.repos.listReleases.mockResolvedValue({
+        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
       });
 
       await run();
@@ -347,7 +367,6 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should handle previous releases fetch failure', async () => {
-      mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('API Error'));
       mockOctokit.rest.repos.listReleases.mockRejectedValue(new Error('API Error'));
 
       await run();
@@ -360,10 +379,9 @@ describe('Publish GitHub Action', () => {
       });
     });
 
-    test('should fall back to listReleases when getLatestRelease fails', async () => {
-      mockOctokit.rest.repos.getLatestRelease.mockRejectedValue(new Error('Not Found'));
+    test('should skip non-semver release tags when finding previous tag', async () => {
       mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
+        data: [{ tag_name: 'nightly-2026-04-15' }, { tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
       });
 
       await run();
@@ -376,28 +394,10 @@ describe('Publish GitHub Action', () => {
       });
     });
 
-    test('should fall back to listReleases when latest release tag is not semver', async () => {
-      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
-        data: { tag_name: 'nightly-2026-04-15' }
-      });
+    test('should pick highest version less than current, not chronologically newest', async () => {
+      // v2.0.6 was created after v4.0.0 (hotpatch), but we're publishing v4.0.1
       mockOctokit.rest.repos.listReleases.mockResolvedValue({
-        data: [{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]
-      });
-
-      await run();
-
-      expect(mockOctokit.request).toHaveBeenCalledWith('POST /repos/{owner}/{repo}/releases/generate-notes', {
-        owner: 'test-owner',
-        repo: 'test-repo',
-        tag_name: 'v1.2.3',
-        previous_tag_name: 'v1.2.2'
-      });
-    });
-
-    test('should use latest release instead of chronologically newest release', async () => {
-      // Simulate hotpatch scenario: v2.0.6 created after v4.0.0, but v4.0.0 is "latest"
-      mockOctokit.rest.repos.getLatestRelease.mockResolvedValue({
-        data: { tag_name: 'v4.0.0' }
+        data: [{ tag_name: 'v2.0.6' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.5' }]
       });
 
       mockCore.getInput.mockImplementation(name => {
@@ -421,11 +421,47 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should use v4.0.0 (the "latest" release) not v2.0.6 (the most recently created)
+      // Should use v4.0.0 (highest < v4.0.1), not v2.0.6 (most recently created)
       expect(mockOctokit.request).toHaveBeenCalledWith(
         'POST /repos/{owner}/{repo}/releases/generate-notes',
         expect.objectContaining({
           previous_tag_name: 'v4.0.0'
+        })
+      );
+    });
+
+    test('should select correct baseline for backport releases', async () => {
+      // Publishing v2.0.7 when v4.0.1 and v2.0.6 exist — should pick v2.0.6
+      mockOctokit.rest.repos.listReleases.mockResolvedValue({
+        data: [{ tag_name: 'v4.0.1' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.6' }, { tag_name: 'v2.0.5' }]
+      });
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://api.github.com',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          publish_minor_version: 'false',
+          publish_release_branch: 'false',
+          create_release_as_draft: 'false',
+          draft_release_pr_reminder: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ name: 'test-action', version: '2.0.7' }));
+      mockSemver.major.mockReturnValue(2);
+      mockSemver.minor.mockReturnValue(0);
+
+      await run();
+
+      // Should use v2.0.6 (highest < v2.0.7), not v4.0.1
+      expect(mockOctokit.request).toHaveBeenCalledWith(
+        'POST /repos/{owner}/{repo}/releases/generate-notes',
+        expect.objectContaining({
+          previous_tag_name: 'v2.0.6'
         })
       );
     });

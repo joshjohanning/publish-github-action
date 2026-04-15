@@ -412,49 +412,28 @@ export async function run() {
     }
 
     // Find the previous release to use as baseline for release notes.
-    // Use GitHub's "latest" release endpoint which respects the semantic latest
-    // designation rather than chronological creation order. This correctly handles
-    // hotpatches published to older version lines (e.g. v2.0.6 published after v4.0.0).
-    const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
+    // Fetches releases and selects the highest semver-tagged release that is
+    // less than the current version. This correctly handles hotpatches and
+    // backports (e.g. publishing v2.0.7 when v4.0.1 exists picks v2.0.6).
     let previousTag;
 
     try {
-      const { data: latestRelease } = await octokit.rest.repos.getLatestRelease({
+      const releases = await octokit.rest.repos.listReleases({
         owner: context.repo.owner,
-        repo: context.repo.repo
+        repo: context.repo.repo,
+        per_page: 100
       });
 
-      if (latestRelease.tag_name && SEMVER_TAG_PATTERN.test(latestRelease.tag_name)) {
-        previousTag = latestRelease.tag_name;
-      } else {
-        core.info('Latest release tag is missing or not semver, falling back to listReleases');
+      const candidates = releases.data
+        .map(r => r.tag_name)
+        .filter(tag => tag && semver.valid(tag) && semver.lt(tag, version));
+
+      if (candidates.length > 0) {
+        candidates.sort(semver.rcompare);
+        previousTag = candidates[0];
       }
     } catch (error) {
-      // If fetching the latest release fails for any reason, fall back to listReleases.
-      core.info(`Could not fetch latest release, falling back to listReleases: ${error.message}`);
-    }
-
-    if (!previousTag) {
-      try {
-        const releases = await octokit.rest.repos.listReleases({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          per_page: 100
-        });
-
-        if (releases.data.length > 0) {
-          const semverRelease = releases.data.find(release => {
-            const tagName = release.tag_name;
-            return tagName && SEMVER_TAG_PATTERN.test(tagName);
-          });
-
-          if (semverRelease) {
-            previousTag = semverRelease.tag_name;
-          }
-        }
-      } catch (listError) {
-        core.info(`Could not fetch previous releases: ${listError.message}`);
-      }
+      core.info(`Could not fetch previous releases: ${error.message}`);
     }
 
     // Generate release notes
