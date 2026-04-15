@@ -289,8 +289,8 @@ export function parseIssueReferences(text, owner, repo) {
   // Track issue numbers that belong to a different repo via owner/repo#N
   const crossRepoExclusions = new Set();
 
-  // Match owner/repo#N cross-repo references (/ delimiter prevents backtracking)
-  const crossRepoPattern = /([\w-]+)\/([\w.-]+)#(\d+)/g;
+  // Match owner/repo#N cross-repo references using negated classes to avoid backtracking
+  const crossRepoPattern = /([^\s/#]+)\/([^\s/#]+)#(\d+)/g;
   while ((match = crossRepoPattern.exec(text)) !== null) {
     const refOwner = match[1];
     const refRepo = match[2];
