@@ -411,27 +411,26 @@ export async function run() {
       }
     }
 
-    // Find the previous semver release to use as baseline for release notes
-    const SEMVER_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
+    // Find the previous release to use as baseline for release notes.
+    // Fetches releases and selects the highest semver-tagged release that is
+    // less than the current version. This correctly handles hotpatches and
+    // backports (e.g. publishing v2.0.7 when v4.0.1 exists picks v2.0.6).
     let previousTag;
 
     try {
-      const releases = await octokit.rest.repos.listReleases({
+      const releases = await octokit.paginate(octokit.rest.repos.listReleases, {
         owner: context.repo.owner,
         repo: context.repo.repo,
         per_page: 100
       });
 
-      if (releases.data.length > 0) {
-        // Find the most recent release with a semver tag (vX.Y.Z pattern)
-        const semverRelease = releases.data.find(release => {
-          const tagName = release.tag_name;
-          return tagName && SEMVER_TAG_PATTERN.test(tagName);
-        });
+      const candidates = releases
+        .map(r => r.tag_name)
+        .filter(tag => tag && semver.valid(tag) && semver.lt(tag, version));
 
-        if (semverRelease) {
-          previousTag = semverRelease.tag_name;
-        }
+      if (candidates.length > 0) {
+        candidates.sort(semver.rcompare);
+        previousTag = candidates[0];
       }
     } catch (error) {
       core.info(`Could not fetch previous releases: ${error.message}`);
