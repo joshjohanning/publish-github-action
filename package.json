@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "2.4.0",
+  "version": "3.1.0",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
@@ -8,7 +8,7 @@
     ".": "./dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "scripts": {
     "bundle": "npm run format:write && npm run package",
@@ -36,8 +36,8 @@
   "dependencies": {
     "@actions/core": "^3.0.0",
     "@actions/exec": "^3.0.0",
-    "@actions/github": "^9.0.0",
-    "semver": "^7.7.3"
+    "@actions/github": "^9.1.0",
+    "semver": "^7.7.4"
   },
   "devDependencies": {
     "@joshjohanning/make-coverage-badge-better": "^1.0.1",
@@ -46,10 +46,10 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-github": "^6.0.0",
     "eslint-plugin-import": "^2.32.0",
-    "eslint-plugin-jest": "^29.12.1",
+    "eslint-plugin-jest": "^29.15.2",
     "eslint-plugin-prettier": "^5.5.5",
-    "globals": "^17.3.0",
-    "jest": "^30.2.0",
-    "prettier": "^3.8.1"
+    "globals": "^17.5.0",
+    "jest": "^30.3.0",
+    "prettier": "^3.8.2"
   }
 }

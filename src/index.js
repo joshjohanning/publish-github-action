@@ -100,6 +100,101 @@ async function handleReleasePublished(octokit, context) {
   }
 }
 
+const TRANSIENT_NETWORK_CODES = new Set([
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'ECONNREFUSED',
+  'EPIPE'
+]);
+
+/**
+ * Determine whether an error is likely transient and should be retried.
+ * Retries HTTP 429 / 5xx and common network errors; fails fast on auth/validation errors.
+ * @param {any} error - Error thrown by the operation
+ * @returns {boolean} Whether the error should be retried
+ */
+export function isTransientError(error) {
+  if (!error) {
+    return false;
+  }
+
+  const status = error.status;
+  if (typeof status === 'number') {
+    if (status === 429) {
+      return true;
+    }
+    if (status >= 500 && status < 600) {
+      return true;
+    }
+    if (status === 400 || status === 401 || status === 403 || status === 404 || status === 422) {
+      return false;
+    }
+  }
+
+  const code = error.code;
+  if (typeof code === 'string') {
+    if (TRANSIENT_NETWORK_CODES.has(code)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Retry an async function with exponential backoff
+ * @param {Function} fn - Async function to retry
+ * @param {object} [options] - Retry options
+ * @param {number} [options.retries=3] - Maximum number of retries
+ * @param {number} [options.baseDelay=1000] - Base delay in ms
+ * @param {string} [options.description='operation'] - Description for logging
+ * @param {(error: any) => boolean} [options.shouldRetry] - Optional predicate to decide if an error is retryable
+ * @returns {Promise<*>} Result of the function
+ */
+export async function retryWithBackoff(
+  fn,
+  { retries = 3, baseDelay = 1000, description = 'operation', shouldRetry } = {}
+) {
+  const retriesNum = Number(retries);
+  retries = Number.isFinite(retriesNum) ? Math.max(0, Math.floor(retriesNum)) : 3;
+
+  const baseDelayNum = Number(baseDelay);
+  baseDelay = Number.isFinite(baseDelayNum) && baseDelayNum >= 0 ? baseDelayNum : 1000;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const status = error?.status;
+      const code = error?.code;
+      const message = error?.message ?? String(error);
+      const retryable = typeof shouldRetry === 'function' ? shouldRetry(error) : isTransientError(error);
+
+      if (!retryable) {
+        core.warning(
+          `${description} failed with non-retryable error (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}`
+        );
+        throw error;
+      }
+
+      if (attempt === retries) {
+        core.warning(
+          `${description} failed after ${retries + 1} attempts (status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}`
+        );
+        throw error;
+      }
+
+      const delay = baseDelay * Math.pow(2, attempt);
+      core.warning(
+        `${description} failed (attempt ${attempt + 1}/${retries + 1}, status: ${status ?? 'unknown'}, code: ${code ?? 'unknown'}): ${message}. Retrying in ${delay}ms...`
+      );
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 /**
  * Create a commit using GitHub API for verified commits
  * @param {object} octokit - GitHub API client
@@ -210,13 +305,23 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
     });
     core.info(`Created new verified commit: ${newCommit.sha}`);
 
-    // 6. Update branch reference with new commit
-    await octokit.rest.git.updateRef({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      ref: `heads/${branchName}`,
-      sha: newCommit.sha
-    });
+    // 6. Update branch reference with new commit (retry for transient failures)
+    // The "Object does not exist" error (422) can occur transiently due to
+    // eventual consistency after creating the commit, so we include it as retryable
+    await retryWithBackoff(
+      () =>
+        octokit.rest.git.updateRef({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          ref: `heads/${branchName}`,
+          sha: newCommit.sha
+        }),
+      {
+        description: `Updating ref heads/${branchName}`,
+        shouldRetry: error =>
+          isTransientError(error) || (error?.status === 422 && /object does not exist/i.test(error?.message))
+      }
+    );
     core.info(`Updated branch ${branchName} to ${newCommit.sha}`);
 
     return newCommit.sha;
@@ -260,6 +365,12 @@ export async function run() {
   try {
     const githubToken = core.getInput('github_token', { required: true });
     const githubApiUrl = core.getInput('github_api_url', { required: false });
+    const npmPackageCommand = core.getInput('npm_package_command', { required: false });
+    const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+    const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
+    const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
+    const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
+    const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
 
     const context = github.context;
@@ -278,12 +389,6 @@ export async function run() {
     }
 
     // Continue with normal publish flow for push/workflow_dispatch events
-    const npmPackageCommand = core.getInput('npm_package_command', { required: false });
-    const commitNodeModules = core.getInput('commit_node_modules', { required: false });
-    const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
-    const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
-    const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
-    const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
 
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
