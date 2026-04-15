@@ -48,7 +48,8 @@ const mockOctokit = {
       createRef: jest.fn()
     },
     issues: {
-      createComment: jest.fn()
+      createComment: jest.fn(),
+      get: jest.fn()
     }
   },
   paginate: jest.fn(),
@@ -92,7 +93,7 @@ jest.unstable_mockModule('semver', () => ({
 }));
 
 // Import the main module after mocking
-const { default: run, retryWithBackoff, isTransientError } = await import('../src/index.js');
+const { default: run, retryWithBackoff, isTransientError, parseIssueReferences } = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
@@ -144,6 +145,7 @@ describe('Publish GitHub Action', () => {
     });
     mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
+    mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'closed', pull_request: undefined } });
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
@@ -1273,6 +1275,292 @@ describe('Publish GitHub Action', () => {
       // Should warn but not fail
       expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+  });
+
+  describe('parseIssueReferences', () => {
+    test('should parse #N references', () => {
+      const text = 'Fixed #42 and resolved #99';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual(expect.arrayContaining([42, 99]));
+    });
+
+    test('should parse owner/repo#N references for same repo', () => {
+      const text = 'Fixes test-owner/test-repo#55';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([55]);
+    });
+
+    test('should ignore cross-repo references', () => {
+      const text = 'Fixes other-owner/other-repo#55';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([]);
+    });
+
+    test('should parse GitHub issue URLs', () => {
+      const text = 'See https://github.com/test-owner/test-repo/issues/77';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([77]);
+    });
+
+    test('should ignore GitHub issue URLs from other repos', () => {
+      const text = 'See https://github.com/other/repo/issues/77';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([]);
+    });
+
+    test('should deduplicate issue numbers', () => {
+      const text = 'Fixes #42, also see #42 and https://github.com/test-owner/test-repo/issues/42';
+      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([42]);
+    });
+
+    test('should return empty array for empty or null text', () => {
+      expect(parseIssueReferences('', 'owner', 'repo')).toEqual([]);
+      expect(parseIssueReferences(null, 'owner', 'repo')).toEqual([]);
+      expect(parseIssueReferences(undefined, 'owner', 'repo')).toEqual([]);
+    });
+
+    test('should handle release notes with PR URLs and issue refs', () => {
+      const text =
+        `## What's Changed\n` +
+        '* Fix login bug (Fixes #45) by @user in https://github.com/test-owner/test-repo/pull/42\n' +
+        '* New feature by @user in https://github.com/test-owner/test-repo/pull/43\n';
+      const result = parseIssueReferences(text, 'test-owner', 'test-repo');
+      // Should pick up issue reference #45 from PR title
+      expect(result).toContain(45);
+      // PR URLs (/pull/N) do not contain #N and are not matched as issue references
+      expect(result).not.toContain(42);
+      expect(result).not.toContain(43);
+    });
+  });
+
+  describe('Comment on linked issues', () => {
+    test('should comment on closed issues referenced in release notes', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10 and #20' } });
+      mockOctokit.rest.issues.get.mockImplementation(({ issue_number }) => {
+        if (issue_number === 10) {
+          return Promise.resolve({ data: { state: 'closed', pull_request: undefined } });
+        }
+        if (issue_number === 20) {
+          return Promise.resolve({ data: { state: 'closed', pull_request: undefined } });
+        }
+        return Promise.resolve({ data: { state: 'open', pull_request: undefined } });
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 10
+      });
+      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 20
+      });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 10,
+        body: expect.stringContaining('shipped in **v1.2.3**')
+      });
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 20,
+        body: expect.stringContaining('shipped in **v1.2.3**')
+      });
+      expect(mockCore.info).toHaveBeenCalledWith('Commented on 2 closed issue(s)');
+    });
+
+    test('should skip open issues', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
+      mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'open', pull_request: undefined } });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 10
+      });
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('#10 is not closed (state: open), skipping');
+    });
+
+    test('should skip pull requests', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Includes #10' } });
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: { state: 'closed', pull_request: { url: 'https://api.github.com/repos/test-owner/test-repo/pulls/10' } }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('#10 is a pull request, skipping');
+    });
+
+    test('should not run when comment_on_linked_issues is false', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'false'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+    });
+
+    test('should handle no issue references in release notes', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'No issues referenced here' } });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No issue references found in release notes');
+    });
+
+    test('should handle issue API failure gracefully', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
+      mockOctokit.rest.issues.get.mockRejectedValue(new Error('Not Found'));
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith('Could not process issue #10: Not Found');
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should include release URL in comment', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          comment_on_linked_issues: 'true'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockImplementation((path, _encoding) => {
+        if (path === 'package.json') {
+          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+        }
+        return 'dist file content';
+      });
+
+      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
+      mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'closed', pull_request: undefined } });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
+        owner: 'test-owner',
+        repo: 'test-repo',
+        issue_number: 10,
+        body: expect.stringContaining('https://github.com/test-owner/test-repo/releases/tag/v1.2.3')
+      });
     });
   });
 

@@ -36,6 +36,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `publish_release_branch`    | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                                                                                                                                                                                  | No       | `false`                 |
 | `create_release_as_draft`   | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing | No       | `false`                 |
 | `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release                                                                                                                                                                                                                                       | No       | `false`                 |
+| `comment_on_linked_issues`  | Comment on closed issues referenced in the release notes to notify followers of the release                                                                                                                                                                                                                  | No       | `false`                 |
 
 ### Commit Signing Behavior
 
@@ -57,6 +58,7 @@ The action requires specific permissions depending on features used:
 | ---------------------- | -------- | ---------------------------------------------------------------------- |
 | `contents: write`      | Yes      | Push tags and create releases                                          |
 | `pull-requests: write` | No       | Post reminder comment on merged PR (`draft_release_pr_reminder: true`) |
+| `issues: write`        | No       | Comment on linked issues (`comment_on_linked_issues: true`)            |
 
 Example with all permissions:
 
@@ -64,6 +66,7 @@ Example with all permissions:
 permissions:
   contents: write
   pull-requests: write # only needed if using draft_release_pr_reminder
+  issues: write # only needed if using comment_on_linked_issues
 ```
 
 ## Example Workflow

@@ -269,6 +269,49 @@ function getFilesRecursively(dir) {
 }
 
 /**
+ * Parse issue references from release notes text.
+ * Extracts issue numbers referenced via `#N`, `owner/repo#N`, or
+ * `https://github.com/owner/repo/issues/N` patterns.
+ * Only returns issue numbers that belong to the given owner/repo.
+ * @param {string} text - Release notes body text
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @returns {number[]} Array of unique issue numbers
+ */
+export function parseIssueReferences(text, owner, repo) {
+  if (!text) {
+    return [];
+  }
+
+  const issues = new Set();
+
+  // Match #N patterns (optionally preceded by owner/repo)
+  const hashRefPattern = /(?:([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+))?#(\d+)/g;
+  let match;
+  while ((match = hashRefPattern.exec(text)) !== null) {
+    const refOwner = match[1] || owner;
+    const refRepo = match[2] || repo;
+    const issueNum = parseInt(match[3], 10);
+    if (refOwner === owner && refRepo === repo) {
+      issues.add(issueNum);
+    }
+  }
+
+  // Match full GitHub issue URLs
+  const urlPattern = /https?:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/g;
+  while ((match = urlPattern.exec(text)) !== null) {
+    const refOwner = match[1];
+    const refRepo = match[2];
+    const issueNum = parseInt(match[3], 10);
+    if (refOwner === owner && refRepo === repo) {
+      issues.add(issueNum);
+    }
+  }
+
+  return [...issues];
+}
+
+/**
  * Main action logic
  */
 export async function run() {
@@ -282,6 +325,7 @@ export async function run() {
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
+    const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
 
     const context = github.context;
     const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
@@ -515,6 +559,64 @@ export async function run() {
         }
       } catch (error) {
         core.warning(`Could not post PR comment: ${error.message}`);
+      }
+    }
+
+    // Comment on closed issues referenced in release notes
+    if (commentOnLinkedIssues === 'true' && releaseNotes) {
+      try {
+        const referencedIssues = parseIssueReferences(releaseNotes, context.repo.owner, context.repo.repo);
+
+        if (referencedIssues.length === 0) {
+          core.info('No issue references found in release notes');
+        } else {
+          core.info(
+            `Found ${referencedIssues.length} issue reference(s) in release notes: ${referencedIssues.join(', ')}`
+          );
+
+          const releaseUrl = release.data.html_url;
+          let commentedCount = 0;
+
+          for (const issueNumber of referencedIssues) {
+            try {
+              const { data: issue } = await octokit.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber
+              });
+
+              // Skip PRs (the issues API also returns PRs)
+              if (issue.pull_request) {
+                core.info(`#${issueNumber} is a pull request, skipping`);
+                continue;
+              }
+
+              // Only comment on closed issues
+              if (issue.state !== 'closed') {
+                core.info(`#${issueNumber} is not closed (state: ${issue.state}), skipping`);
+                continue;
+              }
+
+              const commentBody = `🚀 This has been shipped in **${version}**! ([Release notes](${releaseUrl}))`;
+
+              await octokit.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: commentBody
+              });
+
+              commentedCount++;
+              core.info(`Posted release comment on issue #${issueNumber}`);
+            } catch (error) {
+              core.warning(`Could not process issue #${issueNumber}: ${error.message}`);
+            }
+          }
+
+          core.info(`Commented on ${commentedCount} closed issue(s)`);
+        }
+      } catch (error) {
+        core.warning(`Could not comment on linked issues: ${error.message}`);
       }
     }
 
