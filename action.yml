@@ -41,7 +41,7 @@ inputs:
     default: 'false'
     required: false
   comment_on_linked_issues:
-    description: 'Comment on closed issues referenced in the release notes to notify followers of the release'
+    description: 'Comment on closed issues linked to PRs in the release notes to notify followers of the release'
     default: 'false'
     required: false
 runs:

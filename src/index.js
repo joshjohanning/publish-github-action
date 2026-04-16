@@ -269,60 +269,36 @@ function getFilesRecursively(dir) {
 }
 
 /**
- * Parse issue references from release notes text.
- * Extracts issue numbers referenced via `#N`, `owner/repo#N`, or
- * `https://github.com/owner/repo/issues/N` patterns.
- * Only returns issue numbers that belong to the given owner/repo.
+ * Parse pull request numbers from generated release notes.
+ * GitHub's release notes format includes PR URLs like:
+ *   https://github.com/owner/repo/pull/42
  * @param {string} text - Release notes body text
- * @param {string} owner - Repository owner
- * @param {string} repo - Repository name
- * @returns {number[]} Array of unique issue numbers
+ * @returns {number[]} Array of unique PR numbers
  */
-export function parseIssueReferences(text, owner, repo) {
+export function parsePullRequestNumbers(text) {
   if (!text) {
     return [];
   }
 
-  const issues = new Set();
+  const prNumbers = new Set();
+  const prUrlPattern = /\/pull\/(\d+)/g;
   let match;
-
-  // Track positions of #N that are part of cross-repo references
-  const crossRepoHashPositions = new Set();
-
-  // Match owner/repo#N cross-repo references using negated classes to avoid backtracking
-  const crossRepoPattern = /([^\s/#]+)\/([^\s/#]+)#(\d+)/g;
-  while ((match = crossRepoPattern.exec(text)) !== null) {
-    const refOwner = match[1];
-    const refRepo = match[2];
-    const issueNum = parseInt(match[3], 10);
-    // Record the position of the '#' in this cross-repo match
-    const hashPos = match.index + match[0].lastIndexOf('#');
-    crossRepoHashPositions.add(hashPos);
-    if (refOwner === owner && refRepo === repo) {
-      issues.add(issueNum);
-    }
+  while ((match = prUrlPattern.exec(text)) !== null) {
+    prNumbers.add(parseInt(match[1], 10));
   }
+  return [...prNumbers];
+}
 
-  // Match standalone #N references (skip those already handled as cross-repo)
-  const hashRefPattern = /#(\d+)/g;
-  while ((match = hashRefPattern.exec(text)) !== null) {
-    if (!crossRepoHashPositions.has(match.index)) {
-      issues.add(parseInt(match[1], 10));
-    }
-  }
+const RELEASE_COMMENT_MARKER = '<!-- publish-github-action-release -->';
 
-  // Match full GitHub issue URLs
-  const urlPattern = /https?:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/g;
-  while ((match = urlPattern.exec(text)) !== null) {
-    const refOwner = match[1];
-    const refRepo = match[2];
-    const issueNum = parseInt(match[3], 10);
-    if (refOwner === owner && refRepo === repo) {
-      issues.add(issueNum);
-    }
-  }
-
-  return [...issues];
+/**
+ * Build the release comment body with an HTML marker for idempotency.
+ * @param {string} version - Version tag (e.g. v1.2.3)
+ * @param {string} releaseUrl - URL to the release page
+ * @returns {string} Comment body
+ */
+function buildReleaseCommentBody(version, releaseUrl) {
+  return `${RELEASE_COMMENT_MARKER}\n🚀 This has been shipped in **${version}**! ([Release notes](${releaseUrl}))`;
 }
 
 /**
@@ -576,58 +552,125 @@ export async function run() {
       }
     }
 
-    // Comment on closed issues referenced in release notes
+    // Comment on closed issues linked to PRs in the release notes
     if (commentOnLinkedIssues === 'true' && releaseNotes) {
       try {
-        const referencedIssues = parseIssueReferences(releaseNotes, context.repo.owner, context.repo.repo);
+        const prNumbers = parsePullRequestNumbers(releaseNotes);
 
-        if (referencedIssues.length === 0) {
-          core.info('No issue references found in release notes');
+        if (prNumbers.length === 0) {
+          core.info('No pull request references found in release notes');
         } else {
-          core.info(
-            `Found ${referencedIssues.length} issue reference(s) in release notes: ${referencedIssues.join(', ')}`
-          );
+          core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
 
-          const releaseUrl = release.data.html_url;
-          let commentedCount = 0;
-
-          for (const issueNumber of referencedIssues) {
+          // Query GraphQL for closing issue references on each PR
+          const linkedIssues = new Set();
+          for (const prNumber of prNumbers) {
             try {
-              const { data: issue } = await octokit.rest.issues.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber
-              });
+              const result = await retryWithBackoff(
+                () =>
+                  octokit.graphql(
+                    `query($owner: String!, $repo: String!, $pr: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $pr) {
+                        closingIssuesReferences(first: 50) {
+                          nodes {
+                            number
+                            state
+                            repository {
+                              owner { login }
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }`,
+                    { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber }
+                  ),
+                { retries: 2, baseDelay: 1000 }
+              );
 
-              // Skip PRs (the issues API also returns PRs)
-              if (issue.pull_request) {
-                core.info(`#${issueNumber} is a pull request, skipping`);
-                continue;
+              const closingIssues = result.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
+              for (const issue of closingIssues) {
+                const issueOwner = issue.repository?.owner?.login;
+                const issueRepo = issue.repository?.name;
+                // Case-insensitive comparison for owner/repo
+                if (
+                  issueOwner?.toLowerCase() === context.repo.owner.toLowerCase() &&
+                  issueRepo?.toLowerCase() === context.repo.repo.toLowerCase() &&
+                  issue.state === 'CLOSED'
+                ) {
+                  linkedIssues.add(issue.number);
+                }
               }
-
-              // Only comment on closed issues
-              if (issue.state !== 'closed') {
-                core.info(`#${issueNumber} is not closed (state: ${issue.state}), skipping`);
-                continue;
-              }
-
-              const commentBody = `🚀 This has been shipped in **${version}**! ([Release notes](${releaseUrl}))`;
-
-              await octokit.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: commentBody
-              });
-
-              commentedCount++;
-              core.info(`Posted release comment on issue #${issueNumber}`);
             } catch (error) {
-              core.warning(`Could not process issue #${issueNumber}: ${error.message}`);
+              core.warning(`Could not fetch linked issues for PR #${prNumber}: ${error.message}`);
             }
           }
 
-          core.info(`Commented on ${commentedCount} closed issue(s)`);
+          if (linkedIssues.size === 0) {
+            core.info('No closed linked issues found across PRs');
+          } else {
+            core.info(`Found ${linkedIssues.size} closed linked issue(s): ${[...linkedIssues].join(', ')}`);
+
+            const releaseUrl = release.data.html_url;
+            const commentBody = buildReleaseCommentBody(version, releaseUrl);
+            let commentedCount = 0;
+
+            for (const issueNumber of linkedIssues) {
+              try {
+                // Check for existing comment with our marker for idempotency
+                const existingComments = await retryWithBackoff(
+                  () =>
+                    octokit.paginate(octokit.rest.issues.listComments, {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: issueNumber,
+                      per_page: 100
+                    }),
+                  { retries: 2, baseDelay: 1000 }
+                );
+
+                const existingComment = existingComments.find(c => c.body?.includes(RELEASE_COMMENT_MARKER));
+
+                if (existingComment) {
+                  if (existingComment.body !== commentBody) {
+                    await retryWithBackoff(
+                      () =>
+                        octokit.rest.issues.updateComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          comment_id: existingComment.id,
+                          body: commentBody
+                        }),
+                      { retries: 2, baseDelay: 1000 }
+                    );
+                    core.info(`Updated release comment on issue #${issueNumber}`);
+                  } else {
+                    core.info(`Release comment on issue #${issueNumber} is already up to date`);
+                  }
+                } else {
+                  await retryWithBackoff(
+                    () =>
+                      octokit.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: issueNumber,
+                        body: commentBody
+                      }),
+                    { retries: 2, baseDelay: 1000 }
+                  );
+                  core.info(`Posted release comment on issue #${issueNumber}`);
+                }
+
+                commentedCount++;
+              } catch (error) {
+                core.warning(`Could not process issue #${issueNumber}: ${error.message}`);
+              }
+            }
+
+            core.info(`Processed ${commentedCount} closed issue(s)`);
+          }
         }
       } catch (error) {
         core.warning(`Could not comment on linked issues: ${error.message}`);

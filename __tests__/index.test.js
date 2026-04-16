@@ -49,10 +49,12 @@ const mockOctokit = {
     },
     issues: {
       createComment: jest.fn(),
-      get: jest.fn()
+      listComments: jest.fn(),
+      updateComment: jest.fn()
     }
   },
   paginate: jest.fn(),
+  graphql: jest.fn(),
   request: jest.fn()
 };
 
@@ -93,7 +95,7 @@ jest.unstable_mockModule('semver', () => ({
 }));
 
 // Import the main module after mocking
-const { default: run, retryWithBackoff, isTransientError, parseIssueReferences } = await import('../src/index.js');
+const { default: run, retryWithBackoff, isTransientError, parsePullRequestNumbers } = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
@@ -145,7 +147,8 @@ describe('Publish GitHub Action', () => {
     });
     mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
-    mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'closed', pull_request: undefined } });
+    mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
+    mockOctokit.graphql.mockResolvedValue({ repository: { pullRequest: { closingIssuesReferences: { nodes: [] } } } });
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
@@ -1278,296 +1281,297 @@ describe('Publish GitHub Action', () => {
     });
   });
 
-  describe('parseIssueReferences', () => {
-    test('should parse #N references', () => {
-      const text = 'Fixed #42 and resolved #99';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual(expect.arrayContaining([42, 99]));
+  describe('parsePullRequestNumbers', () => {
+    test('should parse PR URLs from release notes', () => {
+      const text =
+        `## What's Changed\n` +
+        '* Fix login bug by @user in https://github.com/test-owner/test-repo/pull/42\n' +
+        '* New feature by @user in https://github.com/test-owner/test-repo/pull/43\n';
+      expect(parsePullRequestNumbers(text)).toEqual(expect.arrayContaining([42, 43]));
     });
 
-    test('should parse owner/repo#N references for same repo', () => {
-      const text = 'Fixes test-owner/test-repo#55';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([55]);
-    });
-
-    test('should ignore cross-repo references', () => {
-      const text = 'Fixes other-owner/other-repo#55';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([]);
-    });
-
-    test('should parse GitHub issue URLs', () => {
-      const text = 'See https://github.com/test-owner/test-repo/issues/77';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([77]);
-    });
-
-    test('should ignore GitHub issue URLs from other repos', () => {
-      const text = 'See https://github.com/other/repo/issues/77';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([]);
-    });
-
-    test('should deduplicate issue numbers', () => {
-      const text = 'Fixes #42, also see #42 and https://github.com/test-owner/test-repo/issues/42';
-      expect(parseIssueReferences(text, 'test-owner', 'test-repo')).toEqual([42]);
+    test('should deduplicate PR numbers', () => {
+      const text = 'Mentioned in https://github.com/owner/repo/pull/10 and also /pull/10';
+      expect(parsePullRequestNumbers(text)).toEqual([10]);
     });
 
     test('should return empty array for empty or null text', () => {
-      expect(parseIssueReferences('', 'owner', 'repo')).toEqual([]);
-      expect(parseIssueReferences(null, 'owner', 'repo')).toEqual([]);
-      expect(parseIssueReferences(undefined, 'owner', 'repo')).toEqual([]);
+      expect(parsePullRequestNumbers('')).toEqual([]);
+      expect(parsePullRequestNumbers(null)).toEqual([]);
+      expect(parsePullRequestNumbers(undefined)).toEqual([]);
     });
 
-    test('should handle release notes with PR URLs and issue refs', () => {
-      const text =
-        `## What's Changed\n` +
-        '* Fix login bug (Fixes #45) by @user in https://github.com/test-owner/test-repo/pull/42\n' +
-        '* New feature by @user in https://github.com/test-owner/test-repo/pull/43\n';
-      const result = parseIssueReferences(text, 'test-owner', 'test-repo');
-      // Should pick up issue reference #45 from PR title
-      expect(result).toContain(45);
-      // PR URLs (/pull/N) do not contain #N and are not matched as issue references
-      expect(result).not.toContain(42);
-      expect(result).not.toContain(43);
-    });
-
-    test('should not exclude same-numbered issue when cross-repo ref uses same number', () => {
-      const text = 'Fixes other-owner/other-repo#42 and also fixes #42';
-      const result = parseIssueReferences(text, 'test-owner', 'test-repo');
-      // Standalone #42 should still be included even though other-owner/other-repo#42 exists
-      expect(result).toEqual([42]);
+    test('should return empty array when no PR URLs present', () => {
+      expect(parsePullRequestNumbers('No PRs here, just #42')).toEqual([]);
     });
   });
 
   describe('Comment on linked issues', () => {
-    test('should comment on closed issues referenced in release notes', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
-      });
+    const linkedIssuesInputs = {
+      github_token: 'test-token',
+      npm_package_command: 'npm run package',
+      commit_node_modules: 'false',
+      commit_dist_folder: 'true',
+      comment_on_linked_issues: 'true'
+    };
 
+    const setupLinkedIssuesTest = () => {
+      mockCore.getInput.mockImplementation(name => linkedIssuesInputs[name] || '');
       mockFs.readFileSync.mockImplementation((path, _encoding) => {
         if (path === 'package.json') {
           return JSON.stringify({ name: 'test-action', version: '1.2.3' });
         }
         return 'dist file content';
       });
+    };
 
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10 and #20' } });
-      mockOctokit.rest.issues.get.mockImplementation(({ issue_number }) => {
-        if (issue_number === 10) {
-          return Promise.resolve({ data: { state: 'closed', pull_request: undefined } });
+    const graphqlClosingIssuesResponse = issues => ({
+      repository: {
+        pullRequest: {
+          closingIssuesReferences: {
+            nodes: issues.map(i => ({
+              number: i.number,
+              state: i.state || 'CLOSED',
+              repository: {
+                owner: { login: i.owner || 'test-owner' },
+                name: i.repo || 'test-repo'
+              }
+            }))
+          }
         }
-        if (issue_number === 20) {
-          return Promise.resolve({ data: { state: 'closed', pull_request: undefined } });
+      }
+    });
+
+    test('should comment on closed issues linked to PRs in release notes', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: {
+          body:
+            '* Fix by @user in https://github.com/test-owner/test-repo/pull/42\n' +
+            '* Update by @user in https://github.com/test-owner/test-repo/pull/43\n'
         }
-        return Promise.resolve({ data: { state: 'open', pull_request: undefined } });
+      });
+      mockOctokit.graphql
+        .mockResolvedValueOnce(graphqlClosingIssuesResponse([{ number: 10 }]))
+        .mockResolvedValueOnce(graphqlClosingIssuesResponse([{ number: 20 }]));
+      // No existing comments — paginate returns [] for listing comments
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
       });
 
       await run();
 
-      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 10
-      });
-      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 20
-      });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 10,
-        body: expect.stringContaining('shipped in **v1.2.3**')
-      });
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 20,
-        body: expect.stringContaining('shipped in **v1.2.3**')
-      });
-      expect(mockCore.info).toHaveBeenCalledWith('Commented on 2 closed issue(s)');
+      expect(mockOctokit.graphql).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
+      );
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ issue_number: 20, body: expect.stringContaining('shipped in **v1.2.3**') })
+      );
+      expect(mockCore.info).toHaveBeenCalledWith('Processed 2 closed issue(s)');
     });
 
-    test('should skip open issues', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
+    test('should skip open issues from GraphQL response', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix by @user in https://github.com/test-owner/test-repo/pull/42\n' }
       });
-
-      mockFs.readFileSync.mockImplementation((path, _encoding) => {
-        if (path === 'package.json') {
-          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
-        }
-        return 'dist file content';
-      });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
-      mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'open', pull_request: undefined } });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 10
-      });
-      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith('#10 is not closed (state: open), skipping');
-    });
-
-    test('should skip pull requests', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
-      });
-
-      mockFs.readFileSync.mockImplementation((path, _encoding) => {
-        if (path === 'package.json') {
-          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
-        }
-        return 'dist file content';
-      });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Includes #10' } });
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: { state: 'closed', pull_request: { url: 'https://api.github.com/repos/test-owner/test-repo/pulls/10' } }
-      });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10, state: 'OPEN' }]));
 
       await run();
 
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith('#10 is a pull request, skipping');
+      expect(mockCore.info).toHaveBeenCalledWith('No closed linked issues found across PRs');
+    });
+
+    test('should skip issues from different repos', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix by @user in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      mockOctokit.graphql.mockResolvedValue(
+        graphqlClosingIssuesResponse([{ number: 10, owner: 'other-owner', repo: 'other-repo' }])
+      );
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+    });
+
+    test('should handle case-insensitive owner/repo comparison', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix by @user in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      mockOctokit.graphql.mockResolvedValue(
+        graphqlClosingIssuesResponse([{ number: 10, owner: 'Test-Owner', repo: 'Test-Repo' }])
+      );
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 10 }));
     });
 
     test('should not run when comment_on_linked_issues is false', async () => {
       mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'false'
-        };
-        return inputs[name] || '';
+        if (name === 'comment_on_linked_issues') return 'false';
+        return linkedIssuesInputs[name] || '';
       });
-
       mockFs.readFileSync.mockImplementation((path, _encoding) => {
         if (path === 'package.json') {
           return JSON.stringify({ name: 'test-action', version: '1.2.3' });
         }
         return 'dist file content';
       });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
 
       await run();
 
-      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+      expect(mockOctokit.graphql).not.toHaveBeenCalled();
     });
 
-    test('should handle no issue references in release notes', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
-      });
-
-      mockFs.readFileSync.mockImplementation((path, _encoding) => {
-        if (path === 'package.json') {
-          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
-        }
-        return 'dist file content';
-      });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'No issues referenced here' } });
+    test('should handle no PRs in release notes', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({ data: { body: 'No PRs here' } });
 
       await run();
 
-      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith('No issue references found in release notes');
+      expect(mockOctokit.graphql).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('No pull request references found in release notes');
     });
 
-    test('should handle issue API failure gracefully', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
+    test('should handle GraphQL failure gracefully', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
-
-      mockFs.readFileSync.mockImplementation((path, _encoding) => {
-        if (path === 'package.json') {
-          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
-        }
-        return 'dist file content';
-      });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
-      mockOctokit.rest.issues.get.mockRejectedValue(new Error('Not Found'));
+      mockOctokit.graphql.mockRejectedValue(new Error('GraphQL Error'));
 
       await run();
 
-      expect(mockCore.warning).toHaveBeenCalledWith('Could not process issue #10: Not Found');
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        expect.stringContaining('Could not fetch linked issues for PR #42')
+      );
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });
 
-    test('should include release URL in comment', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        const inputs = {
-          github_token: 'test-token',
-          npm_package_command: 'npm run package',
-          commit_node_modules: 'false',
-          commit_dist_folder: 'true',
-          comment_on_linked_issues: 'true'
-        };
-        return inputs[name] || '';
+    test('should update existing comment instead of creating duplicate', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
-
-      mockFs.readFileSync.mockImplementation((path, _encoding) => {
-        if (path === 'package.json') {
-          return JSON.stringify({ name: 'test-action', version: '1.2.3' });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
+      // Existing comment with marker but old version
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([
+            {
+              id: 999,
+              body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.2.2**! ([Release notes](https://old-url))'
+            }
+          ]);
         }
-        return 'dist file content';
+        return Promise.resolve([]);
       });
-
-      mockOctokit.request.mockResolvedValue({ data: { body: 'Fixes #10' } });
-      mockOctokit.rest.issues.get.mockResolvedValue({ data: { state: 'closed', pull_request: undefined } });
 
       await run();
 
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
-        owner: 'test-owner',
-        repo: 'test-repo',
-        issue_number: 10,
-        body: expect.stringContaining('https://github.com/test-owner/test-repo/releases/tag/v1.2.3')
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comment_id: 999,
+          body: expect.stringContaining('shipped in **v1.2.3**')
+        })
+      );
+      // Should NOT create a new comment
+      const createCalls = mockOctokit.rest.issues.createComment.mock.calls.filter(call => call[0].issue_number === 10);
+      expect(createCalls).toHaveLength(0);
+    });
+
+    test('should skip update when existing comment is already up to date', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
+      // Existing comment already matches current version
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([
+            {
+              id: 999,
+              body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.2.3**! ([Release notes](https://github.com/test-owner/test-repo/releases/tag/v1.2.3))'
+            }
+          ]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Release comment on issue #10 is already up to date');
+    });
+
+    test('should include release URL in comment body', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issue_number: 10,
+          body: expect.stringContaining('https://github.com/test-owner/test-repo/releases/tag/v1.2.3')
+        })
+      );
+    });
+
+    test('should deduplicate issues linked from multiple PRs', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: {
+          body:
+            '* Fix in https://github.com/test-owner/test-repo/pull/42\n' +
+            '* Also in https://github.com/test-owner/test-repo/pull/43\n'
+        }
+      });
+      // Both PRs link to the same issue #10
+      mockOctokit.graphql
+        .mockResolvedValueOnce(graphqlClosingIssuesResponse([{ number: 10 }]))
+        .mockResolvedValueOnce(graphqlClosingIssuesResponse([{ number: 10 }]));
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      // Should only comment once on issue #10
+      const createCalls = mockOctokit.rest.issues.createComment.mock.calls.filter(call => call[0].issue_number === 10);
+      expect(createCalls).toHaveLength(1);
     });
   });
 
