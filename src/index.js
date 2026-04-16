@@ -272,7 +272,7 @@ function getFilesRecursively(dir) {
  * Parse pull request numbers from generated release notes.
  * GitHub's release notes format includes PR URLs like:
  *   https://github.com/owner/repo/pull/42
- * @param {string} text - Release notes body text
+ * @param {string | null | undefined} text - Release notes body text
  * @returns {number[]} Array of unique PR numbers
  */
 export function parsePullRequestNumbers(text) {
@@ -567,7 +567,8 @@ export async function run() {
           try {
             const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
               retries: 2,
-              baseDelay: 1000
+              baseDelay: 1000,
+              description: 'Get authenticated user'
             });
             authenticatedLogin = authUser.login;
             core.debug(`Authenticated as: ${authenticatedLogin}`);
@@ -607,7 +608,7 @@ export async function run() {
                     }`,
                       { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber, cursor }
                     ),
-                  { retries: 2, baseDelay: 1000 }
+                  { retries: 2, baseDelay: 1000, description: `GraphQL closingIssuesReferences for PR #${prNumber}` }
                 );
 
                 const refs = result.repository?.pullRequest?.closingIssuesReferences;
@@ -653,15 +654,16 @@ export async function run() {
                       issue_number: issueNumber,
                       per_page: 100
                     }),
-                  { retries: 2, baseDelay: 1000 }
+                  { retries: 2, baseDelay: 1000, description: `List comments on issue #${issueNumber}` }
                 );
 
-                // Only consider marker comments authored by us (or any if we couldn't determine identity)
-                const existingComment = existingComments.find(
-                  c =>
-                    c.body?.includes(RELEASE_COMMENT_MARKER) &&
-                    (authenticatedLogin === null || c.user?.login === authenticatedLogin)
-                );
+                // Only consider marker comments authored by us; skip if we couldn't determine identity
+                const existingComment =
+                  authenticatedLogin === null
+                    ? null
+                    : existingComments.find(
+                        c => c.body?.includes(RELEASE_COMMENT_MARKER) && c.user?.login === authenticatedLogin
+                      );
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {
@@ -673,7 +675,7 @@ export async function run() {
                           comment_id: existingComment.id,
                           body: commentBody
                         }),
-                      { retries: 2, baseDelay: 1000 }
+                      { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
                     );
                     core.info(`Updated release comment on issue #${issueNumber}`);
                   } else {
@@ -688,7 +690,7 @@ export async function run() {
                         issue_number: issueNumber,
                         body: commentBody
                       }),
-                    { retries: 2, baseDelay: 1000 }
+                    { retries: 2, baseDelay: 1000, description: `Create comment on issue #${issueNumber}` }
                   );
                   core.info(`Posted release comment on issue #${issueNumber}`);
                 }
