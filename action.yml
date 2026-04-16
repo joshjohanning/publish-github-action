@@ -41,7 +41,7 @@ inputs:
     default: 'false'
     required: false
   comment_on_linked_issues:
-    description: 'Comment on closed issues linked to PRs in the release notes to notify followers of the release. Also applies to draft releases; comment is updated idempotently on rerun.'
+    description: 'Comment on closed issues linked to PRs in the release notes to notify followers of the release. Comments are posted for both published and draft releases; updated idempotently on rerun.'
     default: 'false'
     required: false
 runs:
