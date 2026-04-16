@@ -10,7 +10,8 @@ const mockCore = {
   setFailed: jest.fn(),
   info: jest.fn(),
   warning: jest.fn(),
-  error: jest.fn()
+  error: jest.fn(),
+  debug: jest.fn()
 };
 
 // Mock the @actions/exec module
@@ -51,6 +52,9 @@ const mockOctokit = {
       createComment: jest.fn(),
       listComments: jest.fn(),
       updateComment: jest.fn()
+    },
+    users: {
+      getAuthenticated: jest.fn()
     }
   },
   paginate: jest.fn(),
@@ -148,7 +152,14 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
-    mockOctokit.graphql.mockResolvedValue({ repository: { pullRequest: { closingIssuesReferences: { nodes: [] } } } });
+    mockOctokit.rest.users.getAuthenticated.mockResolvedValue({ data: { login: 'test-bot' } });
+    mockOctokit.graphql.mockResolvedValue({
+      repository: {
+        pullRequest: {
+          closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } }
+        }
+      }
+    });
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
@@ -1325,7 +1336,7 @@ describe('Publish GitHub Action', () => {
       });
     };
 
-    const graphqlClosingIssuesResponse = issues => ({
+    const graphqlClosingIssuesResponse = (issues, pageInfo) => ({
       repository: {
         pullRequest: {
           closingIssuesReferences: {
@@ -1336,7 +1347,8 @@ describe('Publish GitHub Action', () => {
                 owner: { login: i.owner || 'test-owner' },
                 name: i.repo || 'test-repo'
               }
-            }))
+            })),
+            pageInfo: pageInfo || { hasNextPage: false, endCursor: null }
           }
         }
       }
@@ -1472,12 +1484,13 @@ describe('Publish GitHub Action', () => {
         data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
       mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // Existing comment with marker but old version
+      // Existing comment with marker but old version, authored by the bot
       mockOctokit.paginate.mockImplementation((method, _opts) => {
         if (method === mockOctokit.rest.issues.listComments) {
           return Promise.resolve([
             {
               id: 999,
+              user: { login: 'test-bot' },
               body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.2.2**! ([Release notes](https://old-url))'
             }
           ]);
@@ -1504,12 +1517,13 @@ describe('Publish GitHub Action', () => {
         data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
       mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // Existing comment already matches current version
+      // Existing comment already matches current version, authored by the bot
       mockOctokit.paginate.mockImplementation((method, _opts) => {
         if (method === mockOctokit.rest.issues.listComments) {
           return Promise.resolve([
             {
               id: 999,
+              user: { login: 'test-bot' },
               body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.2.3**! ([Release notes](https://github.com/test-owner/test-repo/releases/tag/v1.2.3))'
             }
           ]);
@@ -1572,6 +1586,60 @@ describe('Publish GitHub Action', () => {
       // Should only comment once on issue #10
       const createCalls = mockOctokit.rest.issues.createComment.mock.calls.filter(call => call[0].issue_number === 10);
       expect(createCalls).toHaveLength(1);
+    });
+
+    test('should ignore marker comment authored by a different user', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
+      // Marker comment exists but authored by someone else
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([
+            {
+              id: 888,
+              user: { login: 'some-other-user' },
+              body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.0.0**! ([Release notes](https://old))'
+            }
+          ]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      // Should create a new comment, not update the foreign one
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
+      );
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    });
+
+    test('should paginate closingIssuesReferences across multiple pages', async () => {
+      setupLinkedIssuesTest();
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      // First page has issue #10 with hasNextPage, second page has issue #20
+      mockOctokit.graphql
+        .mockResolvedValueOnce(
+          graphqlClosingIssuesResponse([{ number: 10 }], { hasNextPage: true, endCursor: 'cursor1' })
+        )
+        .mockResolvedValueOnce(graphqlClosingIssuesResponse([{ number: 20 }]));
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      expect(mockOctokit.graphql).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 10 }));
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 20 }));
     });
   });
 

@@ -562,46 +562,71 @@ export async function run() {
         } else {
           core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
 
-          // Query GraphQL for closing issue references on each PR
+          // Get authenticated user for idempotency author filtering
+          let authenticatedLogin = null;
+          try {
+            const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
+              retries: 2,
+              baseDelay: 1000
+            });
+            authenticatedLogin = authUser.login;
+            core.debug(`Authenticated as: ${authenticatedLogin}`);
+          } catch (error) {
+            core.debug(`Could not determine authenticated user: ${error.message}`);
+          }
+
+          // Query GraphQL for closing issue references on each PR (with pagination)
           const linkedIssues = new Set();
           for (const prNumber of prNumbers) {
             try {
-              const result = await retryWithBackoff(
-                () =>
-                  octokit.graphql(
-                    `query($owner: String!, $repo: String!, $pr: Int!) {
-                    repository(owner: $owner, name: $repo) {
-                      pullRequest(number: $pr) {
-                        closingIssuesReferences(first: 50) {
-                          nodes {
-                            number
-                            state
-                            repository {
-                              owner { login }
-                              name
+              let hasNextPage = true;
+              let cursor = null;
+              while (hasNextPage) {
+                const result = await retryWithBackoff(
+                  () =>
+                    octokit.graphql(
+                      `query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $pr) {
+                          closingIssuesReferences(first: 50, after: $cursor) {
+                            nodes {
+                              number
+                              state
+                              repository {
+                                owner { login }
+                                name
+                              }
+                            }
+                            pageInfo {
+                              hasNextPage
+                              endCursor
                             }
                           }
                         }
                       }
-                    }
-                  }`,
-                    { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber }
-                  ),
-                { retries: 2, baseDelay: 1000 }
-              );
+                    }`,
+                      { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber, cursor }
+                    ),
+                  { retries: 2, baseDelay: 1000 }
+                );
 
-              const closingIssues = result.repository?.pullRequest?.closingIssuesReferences?.nodes || [];
-              for (const issue of closingIssues) {
-                const issueOwner = issue.repository?.owner?.login;
-                const issueRepo = issue.repository?.name;
-                // Case-insensitive comparison for owner/repo
-                if (
-                  issueOwner?.toLowerCase() === context.repo.owner.toLowerCase() &&
-                  issueRepo?.toLowerCase() === context.repo.repo.toLowerCase() &&
-                  issue.state === 'CLOSED'
-                ) {
-                  linkedIssues.add(issue.number);
+                const refs = result.repository?.pullRequest?.closingIssuesReferences;
+                const closingIssues = refs?.nodes || [];
+                for (const issue of closingIssues) {
+                  const issueOwner = issue.repository?.owner?.login;
+                  const issueRepo = issue.repository?.name;
+                  // Case-insensitive comparison for owner/repo
+                  if (
+                    issueOwner?.toLowerCase() === context.repo.owner.toLowerCase() &&
+                    issueRepo?.toLowerCase() === context.repo.repo.toLowerCase() &&
+                    issue.state === 'CLOSED'
+                  ) {
+                    linkedIssues.add(issue.number);
+                  }
                 }
+
+                hasNextPage = refs?.pageInfo?.hasNextPage === true;
+                cursor = refs?.pageInfo?.endCursor || null;
               }
             } catch (error) {
               core.warning(`Could not fetch linked issues for PR #${prNumber}: ${error.message}`);
@@ -631,7 +656,12 @@ export async function run() {
                   { retries: 2, baseDelay: 1000 }
                 );
 
-                const existingComment = existingComments.find(c => c.body?.includes(RELEASE_COMMENT_MARKER));
+                // Only consider marker comments authored by us (or any if we couldn't determine identity)
+                const existingComment = existingComments.find(
+                  c =>
+                    c.body?.includes(RELEASE_COMMENT_MARKER) &&
+                    (authenticatedLogin === null || c.user?.login === authenticatedLogin)
+                );
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {
