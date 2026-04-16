@@ -452,20 +452,29 @@ export async function run() {
     let previousTag;
 
     try {
-      const releases = await octokit.paginate(octokit.rest.repos.listReleases, {
+      let bestCandidate;
+      for await (const { data: page } of octokit.paginate.iterator(octokit.rest.repos.listReleases, {
         owner: context.repo.owner,
         repo: context.repo.repo,
         per_page: 100
-      });
-
-      const candidates = releases
-        .map(r => r.tag_name)
-        .filter(tag => tag && semver.valid(tag) && semver.lt(tag, version));
-
-      if (candidates.length > 0) {
-        candidates.sort(semver.rcompare);
-        previousTag = candidates[0];
+      })) {
+        let pageImprovedCandidate = false;
+        for (const release of page) {
+          const tag = release.tag_name;
+          if (tag && semver.valid(tag) && semver.lt(tag, version)) {
+            if (!bestCandidate || semver.lt(bestCandidate, tag)) {
+              bestCandidate = tag;
+              pageImprovedCandidate = true;
+            }
+          }
+        }
+        // Short-circuit: if we have a candidate and this page didn't improve
+        // it, later pages (older releases) are unlikely to yield a better match
+        if (bestCandidate && !pageImprovedCandidate) {
+          break;
+        }
       }
+      previousTag = bestCandidate;
     } catch (error) {
       core.info(`Could not fetch previous releases: ${error.message}`);
     }

@@ -61,6 +61,18 @@ const mockOctokit = {
   graphql: jest.fn(),
   request: jest.fn()
 };
+mockOctokit.paginate.iterator = jest.fn();
+
+/**
+ * Creates an async iterable that yields pages of data, simulating octokit.paginate.iterator().
+ * @param {Array<Array>} pages - Array of page arrays. Each inner array is one page of results.
+ * @returns {AsyncGenerator<{data: Array}>} Async generator yielding { data: page } objects.
+ */
+async function* asyncPages(pages) {
+  for (const page of pages) {
+    yield { data: page };
+  }
+}
 
 // Mock fs module
 const mockFs = {
@@ -146,6 +158,7 @@ describe('Publish GitHub Action', () => {
     // Mock GitHub API calls
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
     mockOctokit.paginate.mockResolvedValue([]);
+    mockOctokit.paginate.iterator.mockImplementation(() => asyncPages([]));
     mockOctokit.rest.repos.createRelease.mockResolvedValue({
       data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
     });
@@ -316,7 +329,9 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should generate release notes with previous tag', async () => {
-      mockOctokit.paginate.mockResolvedValue([{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]);
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([[{ tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]])
+      );
 
       await run();
 
@@ -367,7 +382,9 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should handle previous releases fetch failure', async () => {
-      mockOctokit.paginate.mockRejectedValue(new Error('API Error'));
+      mockOctokit.paginate.iterator.mockImplementation(() => {
+        throw new Error('API Error');
+      });
 
       await run();
 
@@ -380,11 +397,9 @@ describe('Publish GitHub Action', () => {
     });
 
     test('should skip non-semver release tags when finding previous tag', async () => {
-      mockOctokit.paginate.mockResolvedValue([
-        { tag_name: 'nightly-2026-04-15' },
-        { tag_name: 'v1.2.2' },
-        { tag_name: 'v1.2.1' }
-      ]);
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([[{ tag_name: 'nightly-2026-04-15' }, { tag_name: 'v1.2.2' }, { tag_name: 'v1.2.1' }]])
+      );
 
       await run();
 
@@ -398,7 +413,9 @@ describe('Publish GitHub Action', () => {
 
     test('should pick highest version less than current, not chronologically newest', async () => {
       // v2.0.6 was created after v4.0.0 (hotpatch), but we're publishing v4.0.1
-      mockOctokit.paginate.mockResolvedValue([{ tag_name: 'v2.0.6' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.5' }]);
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([[{ tag_name: 'v2.0.6' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.5' }]])
+      );
 
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -432,12 +449,9 @@ describe('Publish GitHub Action', () => {
 
     test('should select correct baseline for backport releases', async () => {
       // Publishing v2.0.7 when v4.0.1 and v2.0.6 exist — should pick v2.0.6
-      mockOctokit.paginate.mockResolvedValue([
-        { tag_name: 'v4.0.1' },
-        { tag_name: 'v4.0.0' },
-        { tag_name: 'v2.0.6' },
-        { tag_name: 'v2.0.5' }
-      ]);
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([[{ tag_name: 'v4.0.1' }, { tag_name: 'v4.0.0' }, { tag_name: 'v2.0.6' }, { tag_name: 'v2.0.5' }]])
+      );
 
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
