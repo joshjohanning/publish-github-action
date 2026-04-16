@@ -468,8 +468,9 @@ export async function run() {
             }
           }
         }
-        // Short-circuit: if we have a candidate and this page didn't improve
-        // it, later pages (older releases) are unlikely to yield a better match
+        // Short-circuit: GitHub returns releases newest-first, so if we have
+        // a candidate and this page didn't improve it, later pages contain
+        // older releases unlikely to yield a better match
         if (bestCandidate && !pageImprovedCandidate) {
           break;
         }
