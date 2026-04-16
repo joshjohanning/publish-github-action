@@ -269,6 +269,39 @@ function getFilesRecursively(dir) {
 }
 
 /**
+ * Parse pull request numbers from generated release notes.
+ * GitHub's release notes format includes PR URLs like:
+ *   https://github.com/owner/repo/pull/42
+ * @param {string | null | undefined} text - Release notes body text
+ * @returns {number[]} Array of unique PR numbers
+ */
+export function parsePullRequestNumbers(text) {
+  if (!text) {
+    return [];
+  }
+
+  const prNumbers = new Set();
+  const prUrlPattern = /\/pull\/(\d+)/g;
+  let match;
+  while ((match = prUrlPattern.exec(text)) !== null) {
+    prNumbers.add(parseInt(match[1], 10));
+  }
+  return [...prNumbers];
+}
+
+const RELEASE_COMMENT_MARKER = '<!-- publish-github-action-release -->';
+
+/**
+ * Build the release comment body with an HTML marker for idempotency.
+ * @param {string} version - Version tag (e.g. v1.2.3)
+ * @param {string} releaseUrl - URL to the release page
+ * @returns {string} Comment body
+ */
+function buildReleaseCommentBody(version, releaseUrl) {
+  return `${RELEASE_COMMENT_MARKER}\n🚀 This has been shipped in **${version}**! ([Release notes](${releaseUrl}))`;
+}
+
+/**
  * Main action logic
  */
 export async function run() {
@@ -282,6 +315,7 @@ export async function run() {
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
+    const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
 
     const context = github.context;
     const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
@@ -515,6 +549,163 @@ export async function run() {
         }
       } catch (error) {
         core.warning(`Could not post PR comment: ${error.message}`);
+      }
+    }
+
+    // Comment on closed issues linked to PRs in the release notes
+    if (commentOnLinkedIssues === 'true' && releaseNotes) {
+      try {
+        const prNumbers = parsePullRequestNumbers(releaseNotes);
+
+        if (prNumbers.length === 0) {
+          core.info('No pull request references found in release notes');
+        } else {
+          core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
+
+          // Get authenticated user for idempotency author filtering
+          let authenticatedLogin = null;
+          try {
+            const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
+              retries: 2,
+              baseDelay: 1000,
+              description: 'Get authenticated user'
+            });
+            authenticatedLogin = authUser.login;
+            core.debug(`Authenticated as: ${authenticatedLogin}`);
+          } catch (error) {
+            core.debug(`Could not determine authenticated user: ${error.message}`);
+          }
+
+          // Query GraphQL for closing issue references on each PR (with pagination)
+          const linkedIssues = new Set();
+          for (const prNumber of prNumbers) {
+            try {
+              let hasNextPage = true;
+              let cursor = null;
+              while (hasNextPage) {
+                const result = await retryWithBackoff(
+                  () =>
+                    octokit.graphql(
+                      `query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $pr) {
+                          closingIssuesReferences(first: 50, after: $cursor) {
+                            nodes {
+                              number
+                              state
+                              repository {
+                                owner { login }
+                                name
+                              }
+                            }
+                            pageInfo {
+                              hasNextPage
+                              endCursor
+                            }
+                          }
+                        }
+                      }
+                    }`,
+                      { owner: context.repo.owner, repo: context.repo.repo, pr: prNumber, cursor }
+                    ),
+                  { retries: 2, baseDelay: 1000, description: `GraphQL closingIssuesReferences for PR #${prNumber}` }
+                );
+
+                const refs = result.repository?.pullRequest?.closingIssuesReferences;
+                const closingIssues = refs?.nodes || [];
+                for (const issue of closingIssues) {
+                  const issueOwner = issue.repository?.owner?.login;
+                  const issueRepo = issue.repository?.name;
+                  // Case-insensitive comparison for owner/repo
+                  if (
+                    issueOwner?.toLowerCase() === context.repo.owner.toLowerCase() &&
+                    issueRepo?.toLowerCase() === context.repo.repo.toLowerCase() &&
+                    issue.state === 'CLOSED'
+                  ) {
+                    linkedIssues.add(issue.number);
+                  }
+                }
+
+                hasNextPage = refs?.pageInfo?.hasNextPage === true;
+                cursor = refs?.pageInfo?.endCursor || null;
+              }
+            } catch (error) {
+              core.warning(`Could not fetch linked issues for PR #${prNumber}: ${error.message}`);
+            }
+          }
+
+          if (linkedIssues.size === 0) {
+            core.info('No closed linked issues found across PRs');
+          } else {
+            core.info(`Found ${linkedIssues.size} closed linked issue(s): ${[...linkedIssues].join(', ')}`);
+
+            const releaseUrl = release.data.html_url;
+            const commentBody = buildReleaseCommentBody(version, releaseUrl);
+            let commentedCount = 0;
+
+            for (const issueNumber of linkedIssues) {
+              try {
+                // Check for existing comment with our marker for idempotency
+                const existingComments = await retryWithBackoff(
+                  () =>
+                    octokit.paginate(octokit.rest.issues.listComments, {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      issue_number: issueNumber,
+                      per_page: 100
+                    }),
+                  { retries: 2, baseDelay: 1000, description: `List comments on issue #${issueNumber}` }
+                );
+
+                // Only consider marker comments authored by us; skip if we couldn't determine identity
+                const existingComment =
+                  authenticatedLogin === null
+                    ? null
+                    : existingComments.find(
+                        c => c.body?.includes(RELEASE_COMMENT_MARKER) && c.user?.login === authenticatedLogin
+                      );
+
+                if (existingComment) {
+                  if (existingComment.body !== commentBody) {
+                    await retryWithBackoff(
+                      () =>
+                        octokit.rest.issues.updateComment({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          comment_id: existingComment.id,
+                          body: commentBody
+                        }),
+                      { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
+                    );
+                    core.info(`Updated release comment on issue #${issueNumber}`);
+                  } else {
+                    core.info(`Release comment on issue #${issueNumber} is already up to date`);
+                  }
+                } else {
+                  await retryWithBackoff(
+                    () =>
+                      octokit.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: issueNumber,
+                        body: commentBody
+                      }),
+                    { retries: 2, baseDelay: 1000, description: `Create comment on issue #${issueNumber}` }
+                  );
+                  core.info(`Posted release comment on issue #${issueNumber}`);
+                }
+
+                commentedCount++;
+              } catch (error) {
+                core.warning(`Could not process issue #${issueNumber}: ${error.message}`);
+              }
+            }
+
+            core.info(`Processed ${commentedCount} closed issue(s)`);
+          }
+        }
+      } catch (error) {
+        core.warning(`Could not comment on linked issues: ${error.message}`);
       }
     }
 
