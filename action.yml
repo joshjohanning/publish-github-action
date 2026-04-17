@@ -37,7 +37,7 @@ inputs:
     default: 'false'
     required: false
   draft_release_pr_reminder:
-    description: 'Post a reminder comment on the merged PR when creating a draft release'
+    description: 'Post a reminder comment on the merged PR when creating a draft release. When the release is later published (requires `release: [published]` trigger), the comment is updated to show the published state with checked-off steps.'
     default: 'false'
     required: false
   comment_on_linked_issues:
