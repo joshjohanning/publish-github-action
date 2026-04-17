@@ -483,6 +483,48 @@ describe('Publish GitHub Action', () => {
       );
     });
 
+    test('should find correct baseline across multiple pages with early termination', async () => {
+      // Page 1: recent backport releases (lower semver)
+      // Page 2: the actual best candidate v4.9.0
+      // The short-circuit should NOT break early after page 1 since page 1 improved the candidate
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([
+          [{ tag_name: 'v1.0.5' }, { tag_name: 'v1.0.4' }, { tag_name: 'v1.0.3' }],
+          [{ tag_name: 'v4.9.0' }, { tag_name: 'v4.8.0' }],
+          [{ tag_name: 'v3.0.0' }, { tag_name: 'v2.0.0' }]
+        ])
+      );
+
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          github_api_url: 'https://api.github.com',
+          npm_package_command: 'npm run package',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          publish_minor_version: 'false',
+          publish_release_branch: 'false',
+          create_release_as_draft: 'false',
+          draft_release_pr_reminder: 'false'
+        };
+        return inputs[name] || '';
+      });
+
+      mockFs.readFileSync.mockReturnValue(JSON.stringify({ name: 'test-action', version: '5.0.0' }));
+      mockSemver.major.mockReturnValue(5);
+      mockSemver.minor.mockReturnValue(0);
+
+      await run();
+
+      // Should find v4.9.0 on page 2 (highest < v5.0.0), and stop before page 3
+      expect(mockOctokit.request).toHaveBeenCalledWith(
+        'POST /repos/{owner}/{repo}/releases/generate-notes',
+        expect.objectContaining({
+          previous_tag_name: 'v4.9.0'
+        })
+      );
+    });
+
     test('should create release as draft when create_release_as_draft is true', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
