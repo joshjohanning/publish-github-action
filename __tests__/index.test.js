@@ -1444,6 +1444,11 @@ describe('Publish GitHub Action', () => {
 
     test('should use predictable tag URL instead of draft release URL for linked issue comments', async () => {
       setupLinkedIssuesTest();
+      // Override inputs to simulate draft release scenario
+      mockCore.getInput.mockImplementation(name => {
+        if (name === 'create_release_as_draft') return 'true';
+        return linkedIssuesInputs[name] || '';
+      });
       // Simulate a draft release with untagged URL
       mockOctokit.rest.repos.createRelease.mockResolvedValue({
         data: {
