@@ -1442,6 +1442,42 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.info).toHaveBeenCalledWith('Processed 2 closed issue(s)');
     });
 
+    test('should use predictable tag URL instead of draft release URL for linked issue comments', async () => {
+      setupLinkedIssuesTest();
+      // Simulate a draft release with untagged URL
+      mockOctokit.rest.repos.createRelease.mockResolvedValue({
+        data: {
+          id: 123,
+          html_url: 'https://github.com/test-owner/test-repo/releases/tag/untagged-edd26f475091d889baa9'
+        }
+      });
+      mockOctokit.request.mockResolvedValue({
+        data: { body: '* Fix by @user in https://github.com/test-owner/test-repo/pull/42\n' }
+      });
+      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
+      mockOctokit.paginate.mockImplementation((method, _opts) => {
+        if (method === mockOctokit.rest.issues.listComments) {
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      });
+
+      await run();
+
+      // Should use the predictable tag-based URL, not the untagged draft URL
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issue_number: 10,
+          body: expect.stringContaining('releases/tag/v1.2.3')
+        })
+      );
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.not.stringContaining('untagged-')
+        })
+      );
+    });
+
     test('should skip open issues from GraphQL response', async () => {
       setupLinkedIssuesTest();
       mockOctokit.request.mockResolvedValue({

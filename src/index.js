@@ -649,7 +649,10 @@ export async function run() {
           } else {
             core.info(`Found ${linkedIssues.size} closed linked issue(s): ${[...linkedIssues].join(', ')}`);
 
-            const releaseUrl = release.data.html_url;
+            // Use a predictable tag-based URL instead of release.data.html_url,
+            // which points to an untagged draft URL that 404s after publishing
+            const repoUrl = release.data.html_url.replace(/\/releases\/tag\/.*$/, '');
+            const releaseUrl = `${repoUrl}/releases/tag/${version}`;
             const commentBody = buildReleaseCommentBody(version, releaseUrl);
             let commentedCount = 0;
 
