@@ -402,7 +402,8 @@ async function handleReleasePublished(octokit, context) {
             owner: context.repo.owner,
             repo: context.repo.repo,
             issue_number: pr.number,
-            per_page: 100
+            per_page: 100,
+            direction: 'desc'
           }),
         { retries: 2, baseDelay: 1000, description: `List comments on PR #${pr.number}` }
       );
@@ -415,7 +416,9 @@ async function handleReleasePublished(octokit, context) {
         // Primary: version-specific marker
         if (c.body.includes(marker)) return true;
         // Fallback: legacy comments without marker (created before this feature)
-        if (c.body.includes('## 📦 Draft Release Created') && c.body.includes(`**${version}**`)) return true;
+        // Only use fallback when author is confirmed to avoid updating someone else's comment
+        if (authenticatedLogin && c.body.includes('## 📦 Draft Release Created') && c.body.includes(`**${version}**`))
+          return true;
         return false;
       });
 
@@ -472,7 +475,7 @@ export async function run() {
 
     // Handle release.published event — update the draft PR reminder comment
     if (context.eventName === 'release' && context.payload?.action === 'published') {
-      if (draftReleasePrReminder !== 'false') {
+      if (draftReleasePrReminder === 'true') {
         await handleReleasePublished(octokit, context);
       } else {
         core.info('Skipping PR comment update (draft_release_pr_reminder is disabled)');
@@ -674,7 +677,7 @@ export async function run() {
     });
 
     // Post reminder comment on merged PR if draft release was created
-    if (createReleaseAsDraft === 'true' && draftReleasePrReminder !== 'false') {
+    if (createReleaseAsDraft === 'true' && draftReleasePrReminder === 'true') {
       try {
         // Find the PR associated with the current commit (the merge commit)
         const commitShaForPr = context.sha;

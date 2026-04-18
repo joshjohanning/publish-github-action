@@ -2241,8 +2241,28 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should still update since author filter is disabled
+      // Should still update since marker match doesn't require author
       expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 100 }));
+    });
+
+    it('should skip legacy fallback when auth fails (no author confirmation)', async () => {
+      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Auth failed'));
+
+      // Legacy comment has no marker — only heading + version
+      const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.pulls.list.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: legacyBody, user: { login: 'unknown-bot' } }]
+      });
+
+      await run();
+
+      // Should NOT update — legacy fallback requires confirmed author
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
     });
 
     it('should skip if comment already shows published state (idempotency)', async () => {
