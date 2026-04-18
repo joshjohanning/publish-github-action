@@ -408,58 +408,66 @@ async function handleReleasePublished(octokit, context) {
     const mergedPrs = associatedPrs.filter(pr => pr.merged_at);
     core.debug(`Found ${mergedPrs.length} merged PR(s) associated with tag commit`);
 
+    let updatedCount = 0;
     for (const pr of mergedPrs) {
-      const { data: comments } = await retryWithBackoff(
-        () =>
-          octokit.rest.issues.listComments({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            issue_number: pr.number,
-            per_page: 100,
-            direction: 'desc'
-          }),
-        { retries: 2, baseDelay: 1000, description: `List comments on PR #${pr.number}` }
-      );
-
-      // Match by version-specific marker, or fallback to legacy comment shape
-      const markerComment = comments.find(c => {
-        if (!c.body) return false;
-        // Skip if we know the author and it's not us
-        if (authenticatedLogin && c.user?.login !== authenticatedLogin) return false;
-        // Primary: version-specific marker
-        if (c.body.includes(marker)) return true;
-        // Fallback: legacy comments without marker (created before this feature)
-        // Only use fallback when author is confirmed to avoid updating someone else's comment
-        if (authenticatedLogin && c.body.includes('## 📦 Draft Release Created') && c.body.includes(`**${version}**`))
-          return true;
-        return false;
-      });
-
-      if (markerComment) {
-        // Check if already updated
-        if (markerComment.body.includes('## ✅ Release Published')) {
-          core.info(`PR #${pr.number} comment already shows published state, skipping`);
-          continue;
-        }
-
-        const updatedBody = buildPublishedReminderBody(version, releaseUrl);
-
-        await retryWithBackoff(
+      try {
+        const { data: comments } = await retryWithBackoff(
           () =>
-            octokit.rest.issues.updateComment({
+            octokit.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              comment_id: markerComment.id,
-              body: updatedBody
+              issue_number: pr.number,
+              per_page: 100,
+              direction: 'desc'
             }),
-          { retries: 2, baseDelay: 1000, description: `Update comment on PR #${pr.number}` }
+          { retries: 2, baseDelay: 1000, description: `List comments on PR #${pr.number}` }
         );
 
-        core.info(`✅ Updated PR comment on PR #${pr.number}`);
+        // Match by version-specific marker, or fallback to legacy comment shape
+        const markerComment = comments.find(c => {
+          if (!c.body) return false;
+          // Skip if we know the author and it's not us
+          if (authenticatedLogin && c.user?.login !== authenticatedLogin) return false;
+          // Primary: version-specific marker
+          if (c.body.includes(marker)) return true;
+          // Fallback: legacy comments without marker (created before this feature)
+          // Only use fallback when author is confirmed to avoid updating someone else's comment
+          if (authenticatedLogin && c.body.includes('## 📦 Draft Release Created') && c.body.includes(`**${version}**`))
+            return true;
+          return false;
+        });
+
+        if (markerComment) {
+          // Check if already updated
+          if (markerComment.body.includes('## ✅ Release Published')) {
+            core.info(`PR #${pr.number} comment already shows published state, skipping`);
+            continue;
+          }
+
+          const updatedBody = buildPublishedReminderBody(version, releaseUrl);
+
+          await retryWithBackoff(
+            () =>
+              octokit.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: markerComment.id,
+                body: updatedBody
+              }),
+            { retries: 2, baseDelay: 1000, description: `Update comment on PR #${pr.number}` }
+          );
+
+          core.info(`✅ Updated PR comment on PR #${pr.number}`);
+          updatedCount++;
+        }
+      } catch (error) {
+        core.warning(`Could not update comment on PR #${pr.number}: ${error.message}`);
       }
     }
 
-    core.info(`No PR comment found with marker for ${version}`);
+    if (updatedCount === 0) {
+      core.info(`No PR comment found with marker for ${version}`);
+    }
   } catch (error) {
     core.warning(`Could not update PR comment: ${error.message}`);
   }

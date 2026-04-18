@@ -2317,5 +2317,37 @@ describe('Publish GitHub Action', () => {
 
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update PR comment'));
     });
+
+    it('should continue to next PR when updateComment fails on one', async () => {
+      // Two merged PRs associated with the tag commit
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 50, merged_at: '2024-01-01T00:00:00Z' },
+          { number: 51, merged_at: '2024-01-01T00:00:00Z' }
+        ]
+      });
+
+      const marker = `<!-- publish-github-action-draft:v1.2.3 -->`;
+      // PR #50 has the marker but updateComment will fail; PR #51 also has the marker
+      mockOctokit.rest.issues.listComments
+        .mockResolvedValueOnce({
+          data: [{ id: 600, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
+        })
+        .mockResolvedValueOnce({
+          data: [{ id: 601, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
+        });
+
+      // First PR fails immediately (non-retryable, no retry attempts), second PR succeeds
+      mockOctokit.rest.issues.updateComment
+        .mockRejectedValueOnce(new Error('Resource not accessible by integration'))
+        .mockResolvedValueOnce({});
+
+      await run();
+
+      // Should warn about PR #50 but still update PR #51
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update comment on PR #50'));
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(2);
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Updated PR comment on PR #51'));
+    });
   });
 });
