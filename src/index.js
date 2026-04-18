@@ -439,7 +439,7 @@ async function handleReleasePublished(octokit, context) {
         // Check if already updated
         if (markerComment.body.includes('## ✅ Release Published')) {
           core.info(`PR #${pr.number} comment already shows published state, skipping`);
-          return;
+          continue;
         }
 
         const updatedBody = buildPublishedReminderBody(version, releaseUrl);
@@ -456,7 +456,6 @@ async function handleReleasePublished(octokit, context) {
         );
 
         core.info(`✅ Updated PR comment on PR #${pr.number}`);
-        return;
       }
     }
 

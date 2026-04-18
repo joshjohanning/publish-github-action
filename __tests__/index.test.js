@@ -2131,7 +2131,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
       expect(mockCore.info).toHaveBeenCalledWith('Skipping PR comment update (draft_release_pr_reminder is disabled)');
     });
 
@@ -2143,7 +2143,7 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.warning).toHaveBeenCalledWith(
         'Release event missing expected payload data; cannot update PR comments.'
       );
-      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
     });
 
     it('should find and update a draft comment by version-specific marker', async () => {

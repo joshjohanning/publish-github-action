@@ -57,7 +57,7 @@ When `draft_release_pr_reminder: true` is enabled, the action:
 1. **On PR merge** — Posts a reminder comment on the merged PR with a link to the draft release and a next-steps checklist
 2. **On release publish** — Automatically updates the comment to show "✅ Release Published" with checked-off steps and a working link
 
-To enable comment updates when a draft release is published, add the `release: [published]` trigger to your workflow:
+To enable comment updates when a draft release is published, add the `on: release: types: [published]` trigger to your workflow:
 
 ```yml
 on:
