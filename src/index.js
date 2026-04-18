@@ -379,23 +379,36 @@ async function handleReleasePublished(octokit, context) {
   }
 
   try {
-    // Search recent closed PRs for the draft comment
-    const { data: pulls } = await retryWithBackoff(
+    // Resolve the tag to its commit SHA, then find associated PRs deterministically
+    const { data: tagRef } = await retryWithBackoff(
       () =>
-        octokit.rest.pulls.list({
+        octokit.rest.git.getRef({
           owner: context.repo.owner,
           repo: context.repo.repo,
-          state: 'closed',
-          sort: 'updated',
-          direction: 'desc',
-          per_page: 100
+          ref: `tags/${version}`
         }),
-      { retries: 2, baseDelay: 1000, description: 'List recent closed PRs' }
+      { retries: 2, baseDelay: 1000, description: `Get tag ref for ${version}` }
     );
 
-    for (const pr of pulls) {
-      if (!pr.merged_at) continue;
+    const commitSha = tagRef.object.sha;
+    core.debug(`Tag ${version} points to commit ${commitSha}`);
 
+    const { data: associatedPrs } = await retryWithBackoff(
+      () =>
+        octokit.rest.repos.listPullRequestsAssociatedWithCommit({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          commit_sha: commitSha,
+          per_page: 30
+        }),
+      { retries: 2, baseDelay: 1000, description: 'List PRs associated with tag commit' }
+    );
+
+    // Filter to merged PRs only
+    const mergedPrs = associatedPrs.filter(pr => pr.merged_at);
+    core.debug(`Found ${mergedPrs.length} merged PR(s) associated with tag commit`);
+
+    for (const pr of mergedPrs) {
       const { data: comments } = await retryWithBackoff(
         () =>
           octokit.rest.issues.listComments({

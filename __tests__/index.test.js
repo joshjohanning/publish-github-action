@@ -2095,27 +2095,24 @@ describe('Publish GitHub Action', () => {
     beforeEach(() => {
       mockGithubContext.eventName = 'release';
       mockGithubContext.payload = releasePayload;
+
+      // Default: tag resolves to a commit, commit is associated with a merged PR
+      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'tag-commit-sha' } } });
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     });
 
     it('should route release.published event to handleReleasePublished', async () => {
-      mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
-
       await run();
 
-      expect(mockOctokit.rest.pulls.list).toHaveBeenCalledWith(
-        expect.objectContaining({
-          state: 'closed',
-          sort: 'updated',
-          per_page: 100
-        })
+      expect(mockOctokit.rest.git.getRef).toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'tag-commit-sha' })
       );
       expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Release published: v1.2.3'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
     });
 
     it('should not read package.json or create releases on release event', async () => {
-      mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
-
       await run();
 
       // These are part of the normal publish flow — should NOT be called
@@ -2134,7 +2131,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.pulls.list).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
       expect(mockCore.info).toHaveBeenCalledWith('Skipping PR comment update (draft_release_pr_reminder is disabled)');
     });
 
@@ -2146,14 +2143,14 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.warning).toHaveBeenCalledWith(
         'Release event missing expected payload data; cannot update PR comments.'
       );
-      expect(mockOctokit.rest.pulls.list).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
     });
 
     it('should find and update a draft comment by version-specific marker', async () => {
       const draftBody =
         '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2180,7 +2177,7 @@ describe('Publish GitHub Action', () => {
       // Legacy comments don't have the HTML marker
       const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 55, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2198,7 +2195,7 @@ describe('Publish GitHub Action', () => {
     });
 
     it('should skip unmerged PRs', async () => {
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 10, merged_at: null }]
       });
 
@@ -2212,7 +2209,7 @@ describe('Publish GitHub Action', () => {
       const draftBody =
         '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       // Comment is from a different user
@@ -2232,7 +2229,7 @@ describe('Publish GitHub Action', () => {
       const draftBody =
         '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2251,7 +2248,7 @@ describe('Publish GitHub Action', () => {
       // Legacy comment has no marker — only heading + version
       const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2268,7 +2265,7 @@ describe('Publish GitHub Action', () => {
     it('should skip if comment already shows published state (idempotency)', async () => {
       const publishedBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## ✅ Release Published\n\nAlready done.';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2282,7 +2279,7 @@ describe('Publish GitHub Action', () => {
     });
 
     it('should log info when no matching comment is found', async () => {
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2298,7 +2295,7 @@ describe('Publish GitHub Action', () => {
     it('should use predictable tag URL instead of draft URL', async () => {
       const draftBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created';
 
-      mockOctokit.rest.pulls.list.mockResolvedValue({
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
         data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
       });
       mockOctokit.rest.issues.listComments.mockResolvedValue({
@@ -2313,8 +2310,8 @@ describe('Publish GitHub Action', () => {
       expect(updateCall.body).not.toContain('untagged-');
     });
 
-    it('should warn on API error when listing PRs', async () => {
-      mockOctokit.rest.pulls.list.mockRejectedValue(new Error('API rate limit exceeded'));
+    it('should warn on API error when resolving tag', async () => {
+      mockOctokit.rest.git.getRef.mockRejectedValue(new Error('API rate limit exceeded'));
 
       await run();
 
