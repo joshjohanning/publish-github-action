@@ -20,10 +20,16 @@ const mockExec = {
 };
 
 // Mock the @actions/github module
+const mockGithubContext = {
+  eventName: 'push',
+  repo: { owner: 'test-owner', repo: 'test-repo' },
+  sha: 'abc123def456',
+  payload: {}
+};
+
 const mockGithub = {
-  context: {
-    repo: { owner: 'test-owner', repo: 'test-repo' },
-    sha: 'abc123def456'
+  get context() {
+    return mockGithubContext;
   },
   getOctokit: jest.fn()
 };
@@ -55,6 +61,9 @@ const mockOctokit = {
     },
     users: {
       getAuthenticated: jest.fn()
+    },
+    pulls: {
+      list: jest.fn()
     }
   },
   paginate: jest.fn(),
@@ -117,6 +126,12 @@ describe('Publish GitHub Action', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
+    // Reset context to default push event
+    mockGithubContext.eventName = 'push';
+    mockGithubContext.repo = { owner: 'test-owner', repo: 'test-repo' };
+    mockGithubContext.sha = 'abc123def456';
+    mockGithubContext.payload = {};
+
     // Set up default mocks
     mockGithub.getOctokit.mockReturnValue(mockOctokit);
 
@@ -166,6 +181,7 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.users.getAuthenticated.mockResolvedValue({ data: { login: 'test-bot' } });
+    mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
     mockOctokit.graphql.mockResolvedValue({
       repository: {
         pullRequest: {
@@ -2064,6 +2080,274 @@ describe('Publish GitHub Action', () => {
       // initial + 3 retries = 4 calls
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(4);
       expect(mockCore.setFailed).toHaveBeenCalledWith('Object does not exist');
+    });
+  });
+
+  describe('release.published event (update draft PR comment)', () => {
+    const releasePayload = {
+      action: 'published',
+      release: {
+        tag_name: 'v1.2.3',
+        html_url: 'https://github.com/test-owner/test-repo/releases/tag/untagged-abc123def456'
+      }
+    };
+
+    beforeEach(() => {
+      mockGithubContext.eventName = 'release';
+      mockGithubContext.payload = releasePayload;
+
+      // Default: tag resolves to a commit, commit is associated with a merged PR
+      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'tag-commit-sha' } } });
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
+    });
+
+    it('should route release.published event to handleReleasePublished', async () => {
+      await run();
+
+      expect(mockOctokit.rest.git.getRef).toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'tag-commit-sha' })
+      );
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Release published: v1.2.3'));
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
+    });
+
+    it('should not read package.json or create releases on release event', async () => {
+      await run();
+
+      // These are part of the normal publish flow — should NOT be called
+      expect(mockOctokit.rest.repos.listTags).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockExec.exec).not.toHaveBeenCalled();
+    });
+
+    it('should skip when draft_release_pr_reminder is false', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        if (name === 'draft_release_pr_reminder') return 'false';
+        if (name === 'github_token') return 'test-token';
+        if (name === 'github_api_url') return 'https://api.github.com';
+        return '';
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping PR comment update (draft_release_pr_reminder is disabled)');
+    });
+
+    it('should warn and return on missing release payload', async () => {
+      mockGithubContext.payload = { action: 'published', release: {} };
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'Release event missing expected payload data; cannot update PR comments.'
+      );
+      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
+    });
+
+    it('should find and update a draft comment by version-specific marker', async () => {
+      const draftBody =
+        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: draftBody, user: { login: 'test-bot' } }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comment_id: 100,
+          body: expect.stringContaining('## ✅ Release Published')
+        })
+      );
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          body: expect.stringContaining('https://github.com/test-owner/test-repo/releases/tag/v1.2.3')
+        })
+      );
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Updated PR comment on PR #42');
+    });
+
+    it('should find and update a legacy comment without marker', async () => {
+      // Legacy comments don't have the HTML marker
+      const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 55, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 200, body: legacyBody, user: { login: 'test-bot' } }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comment_id: 200,
+          body: expect.stringContaining('## ✅ Release Published')
+        })
+      );
+    });
+
+    it('should skip unmerged PRs', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 10, merged_at: null }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
+    });
+
+    it('should skip comments from other users', async () => {
+      const draftBody =
+        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      // Comment is from a different user
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: draftBody, user: { login: 'other-user' } }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
+    });
+
+    it('should still match comments when auth fails (no author filter)', async () => {
+      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Auth failed'));
+
+      const draftBody =
+        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: draftBody, user: { login: 'unknown-bot' } }]
+      });
+
+      await run();
+
+      // Should still update since marker match doesn't require author
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 100 }));
+    });
+
+    it('should skip legacy fallback when auth fails (no author confirmation)', async () => {
+      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Auth failed'));
+
+      // Legacy comment has no marker — only heading + version
+      const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: legacyBody, user: { login: 'unknown-bot' } }]
+      });
+
+      await run();
+
+      // Should NOT update — legacy fallback requires confirmed author
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
+    });
+
+    it('should skip if comment already shows published state (idempotency)', async () => {
+      const publishedBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## ✅ Release Published\n\nAlready done.';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: publishedBody, user: { login: 'test-bot' } }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('already shows published state'));
+    });
+
+    it('should log info when no matching comment is found', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: 'Unrelated comment', user: { login: 'test-bot' } }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
+    });
+
+    it('should use predictable tag URL instead of draft URL', async () => {
+      const draftBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created';
+
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
+      });
+      mockOctokit.rest.issues.listComments.mockResolvedValue({
+        data: [{ id: 100, body: draftBody, user: { login: 'test-bot' } }]
+      });
+
+      await run();
+
+      // The URL in the updated comment should be the predictable tag URL, not the untagged draft URL
+      const updateCall = mockOctokit.rest.issues.updateComment.mock.calls[0][0];
+      expect(updateCall.body).toContain('https://github.com/test-owner/test-repo/releases/tag/v1.2.3');
+      expect(updateCall.body).not.toContain('untagged-');
+    });
+
+    it('should warn on API error when resolving tag', async () => {
+      mockOctokit.rest.git.getRef.mockRejectedValue(new Error('API rate limit exceeded'));
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update PR comment'));
+    });
+
+    it('should continue to next PR when updateComment fails on one', async () => {
+      // Two merged PRs associated with the tag commit
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 50, merged_at: '2024-01-01T00:00:00Z' },
+          { number: 51, merged_at: '2024-01-01T00:00:00Z' }
+        ]
+      });
+
+      const marker = `<!-- publish-github-action-draft:v1.2.3 -->`;
+      // PR #50 has the marker but updateComment will fail; PR #51 also has the marker
+      mockOctokit.rest.issues.listComments
+        .mockResolvedValueOnce({
+          data: [{ id: 600, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
+        })
+        .mockResolvedValueOnce({
+          data: [{ id: 601, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
+        });
+
+      // First PR fails immediately (non-retryable, no retry attempts), second PR succeeds
+      mockOctokit.rest.issues.updateComment
+        .mockRejectedValueOnce(new Error('Resource not accessible by integration'))
+        .mockResolvedValueOnce({});
+
+      await run();
+
+      // Should warn about PR #50 but still update PR #51
+      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update comment on PR #50'));
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(2);
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Updated PR comment on PR #51'));
     });
   });
 });

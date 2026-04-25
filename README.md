@@ -35,7 +35,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `publish_minor_version`     | Whether to publish minor version tag (e.g., `v1.2`)                                                                                                                                                                                                                                                                    | No       | `false`                 |
 | `publish_release_branch`    | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                                                                                                                                                                                            | No       | `false`                 |
 | `create_release_as_draft`   | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing           | No       | `false`                 |
-| `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release                                                                                                                                                                                                                                                 | No       | `false`                 |
+| `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release. When the release is published (requires `on: release: types: [published]` trigger), the comment is updated to show the published state with checked-off steps.                                                                                 | No       | `false`                 |
 | `comment_on_linked_issues`  | Comment on closed issues linked to PRs in the release notes to notify followers of the release (uses GraphQL `closingIssuesReferences`; idempotent — updates existing comment on rerun). Comments are posted for both published and draft releases; the comment is updated if the version changes on a subsequent run. | No       | `false`                 |
 
 ### Commit Signing Behavior
@@ -49,6 +49,26 @@ The action automatically handles clean builds and file management:
 
 - **Dist folder cleaning**: When `commit_dist_folder: true` and `npm_package_command` is specified, the `dist/` folder is cleaned before building to ensure no stale files persist
 - **Automatic file deletion**: The action removes `.github/` files from release commits and properly handles renamed/deleted files in the `dist/` folder
+
+### Draft Release PR Reminder
+
+When `draft_release_pr_reminder: true` is enabled, the action:
+
+1. **On PR merge** — Posts a reminder comment on the merged PR with a link to the draft release and a next-steps checklist
+2. **On release publish** — Automatically updates the comment to show "✅ Release Published" with checked-off steps and a working link
+
+To enable comment updates when a draft release is published, add the `on: release: types: [published]` trigger to your workflow:
+
+```yml
+on:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+```
+
+> **Note:** Legacy draft comments (created before this update feature was added) are also detected and updated via a fallback matcher.
 
 ## Permissions
 
@@ -80,6 +100,8 @@ on:
   push:
     branches:
       - main
+  release:
+    types: [published] # Required for updating PR comment after draft release is published
 
 jobs:
   publish:
