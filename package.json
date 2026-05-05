@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "3.1.2",
+  "version": "3.1.3",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
@@ -34,9 +34,9 @@
   "author": "joshjohanning",
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^3.0.0",
+    "@actions/core": "^3.0.1",
     "@actions/exec": "^3.0.0",
-    "@actions/github": "^9.1.0",
+    "@actions/github": "^9.1.1",
     "semver": "^7.7.4"
   },
   "devDependencies": {
