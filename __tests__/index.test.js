@@ -1685,7 +1685,7 @@ describe('Publish GitHub Action', () => {
       expect(createCalls).toHaveLength(1);
     });
 
-    test('should update marker comment without requiring an authenticated user lookup', async () => {
+    test('should create a comment when a marker comment cannot be updated', async () => {
       setupLinkedIssuesTest();
       mockOctokit.request.mockResolvedValue({
         data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
@@ -1703,6 +1703,9 @@ describe('Publish GitHub Action', () => {
         }
         return Promise.resolve([]);
       });
+      const forbiddenError = new Error('Resource not accessible by integration');
+      forbiddenError.status = 403;
+      mockOctokit.rest.issues.updateComment.mockRejectedValue(forbiddenError);
 
       await run();
 
@@ -1713,7 +1716,12 @@ describe('Publish GitHub Action', () => {
           body: expect.stringContaining('shipped in **v1.2.3**')
         })
       );
-      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issue_number: 10,
+          body: expect.stringContaining('shipped in **v1.2.3**')
+        })
+      );
     });
 
     test('should paginate closingIssuesReferences across multiple pages', async () => {

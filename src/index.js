@@ -661,17 +661,35 @@ export async function run() {
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {
-                    await retryWithBackoff(
-                      () =>
-                        octokit.rest.issues.updateComment({
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          comment_id: existingComment.id,
-                          body: commentBody
-                        }),
-                      { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
-                    );
-                    core.info(`Updated release comment on issue #${issueNumber}`);
+                    try {
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.updateComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            comment_id: existingComment.id,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Updated release comment on issue #${issueNumber}`);
+                    } catch (error) {
+                      if (error.status !== 403 && error.status !== 404) {
+                        throw error;
+                      }
+
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.createComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: issueNumber,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Create comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Posted release comment on issue #${issueNumber}`);
+                    }
                   } else {
                     core.info(`Release comment on issue #${issueNumber} is already up to date`);
                   }
