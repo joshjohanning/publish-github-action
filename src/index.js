@@ -572,20 +572,6 @@ export async function run() {
         } else {
           core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
 
-          // Get authenticated user for idempotency author filtering
-          let authenticatedLogin = null;
-          try {
-            const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
-              retries: 2,
-              baseDelay: 1000,
-              description: 'Get authenticated user'
-            });
-            authenticatedLogin = authUser.login;
-            core.debug(`Authenticated as: ${authenticatedLogin}`);
-          } catch (error) {
-            core.debug(`Could not determine authenticated user: ${error.message}`);
-          }
-
           // Query GraphQL for closing issue references on each PR (with pagination)
           const linkedIssues = new Set();
           for (const prNumber of prNumbers) {
@@ -671,13 +657,7 @@ export async function run() {
                   { retries: 2, baseDelay: 1000, description: `List comments on issue #${issueNumber}` }
                 );
 
-                // Only consider marker comments authored by us; skip if we couldn't determine identity
-                const existingComment =
-                  authenticatedLogin === null
-                    ? null
-                    : existingComments.find(
-                        c => c.body?.includes(RELEASE_COMMENT_MARKER) && c.user?.login === authenticatedLogin
-                      );
+                const existingComment = existingComments.find(c => c.body?.includes(RELEASE_COMMENT_MARKER));
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {

@@ -1685,13 +1685,12 @@ describe('Publish GitHub Action', () => {
       expect(createCalls).toHaveLength(1);
     });
 
-    test('should ignore marker comment authored by a different user', async () => {
+    test('should update marker comment without requiring an authenticated user lookup', async () => {
       setupLinkedIssuesTest();
       mockOctokit.request.mockResolvedValue({
         data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
       mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // Marker comment exists but authored by someone else
       mockOctokit.paginate.mockImplementation((method, _opts) => {
         if (method === mockOctokit.rest.issues.listComments) {
           return Promise.resolve([
@@ -1707,11 +1706,14 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should create a new comment, not update the foreign one
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
+      expect(mockOctokit.rest.users.getAuthenticated).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comment_id: 888,
+          body: expect.stringContaining('shipped in **v1.2.3**')
+        })
       );
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
     test('should paginate closingIssuesReferences across multiple pages', async () => {
@@ -1737,37 +1739,6 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.graphql).toHaveBeenCalledTimes(2);
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 10 }));
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 20 }));
-    });
-
-    test('should create new comment when getAuthenticated fails and marker exists from other user', async () => {
-      setupLinkedIssuesTest();
-      mockOctokit.request.mockResolvedValue({
-        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
-      });
-      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // getAuthenticated fails — authenticatedLogin will be null
-      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Token lacks user scope'));
-      // Marker comment exists from another user
-      mockOctokit.paginate.mockImplementation((method, _opts) => {
-        if (method === mockOctokit.rest.issues.listComments) {
-          return Promise.resolve([
-            {
-              id: 777,
-              user: { login: 'someone-else' },
-              body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.0.0**! ([Release notes](https://old))'
-            }
-          ]);
-        }
-        return Promise.resolve([]);
-      });
-
-      await run();
-
-      // With null auth, should create new rather than risk updating foreign comment
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
-      );
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
     });
   });
 
