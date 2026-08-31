@@ -572,20 +572,6 @@ export async function run() {
         } else {
           core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
 
-          // Get authenticated user for idempotency author filtering
-          let authenticatedLogin = null;
-          try {
-            const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
-              retries: 2,
-              baseDelay: 1000,
-              description: 'Get authenticated user'
-            });
-            authenticatedLogin = authUser.login;
-            core.debug(`Authenticated as: ${authenticatedLogin}`);
-          } catch (error) {
-            core.debug(`Could not determine authenticated user: ${error.message}`);
-          }
-
           // Query GraphQL for closing issue references on each PR (with pagination)
           const linkedIssues = new Set();
           for (const prNumber of prNumbers) {
@@ -671,27 +657,39 @@ export async function run() {
                   { retries: 2, baseDelay: 1000, description: `List comments on issue #${issueNumber}` }
                 );
 
-                // Only consider marker comments authored by us; skip if we couldn't determine identity
-                const existingComment =
-                  authenticatedLogin === null
-                    ? null
-                    : existingComments.find(
-                        c => c.body?.includes(RELEASE_COMMENT_MARKER) && c.user?.login === authenticatedLogin
-                      );
+                const existingComment = existingComments.find(c => c.body?.includes(RELEASE_COMMENT_MARKER));
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {
-                    await retryWithBackoff(
-                      () =>
-                        octokit.rest.issues.updateComment({
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          comment_id: existingComment.id,
-                          body: commentBody
-                        }),
-                      { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
-                    );
-                    core.info(`Updated release comment on issue #${issueNumber}`);
+                    try {
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.updateComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            comment_id: existingComment.id,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Updated release comment on issue #${issueNumber}`);
+                    } catch (error) {
+                      if (error.status !== 403 && error.status !== 404) {
+                        throw error;
+                      }
+
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.createComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: issueNumber,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Create comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Posted release comment on issue #${issueNumber}`);
+                    }
                   } else {
                     core.info(`Release comment on issue #${issueNumber} is already up to date`);
                   }
