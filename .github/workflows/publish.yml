@@ -45,14 +45,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.event.release.tag_name }}
           persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - run: npm ci --ignore-scripts --allow-git=none
-      - run: npm run package
       - uses: ./
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}

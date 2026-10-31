@@ -149,13 +149,19 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
       });
       existingTree = tree.tree;
     } catch (error) {
+      if (releaseWorkflowFile) {
+        throw new Error(`Could not verify release workflow ${releaseWorkflowFile}: ${error.message}`);
+      }
       core.info(`Could not fetch existing tree: ${error.message}`);
       existingTree = [];
     }
 
     // Remove .github files from release commits, except the selected published-release workflow.
+    if (releaseWorkflowFile && !existingTree.some(item => item.path === releaseWorkflowFile && item.type === 'blob')) {
+      throw new Error(`release_workflow_file ${releaseWorkflowFile} does not exist in the source tree`);
+    }
     const githubFiles = existingTree.filter(
-      item => item.path.startsWith('.github/') && item.path !== releaseWorkflowFile
+      item => item.type === 'blob' && item.path.startsWith('.github/') && item.path !== releaseWorkflowFile
     );
     for (const file of githubFiles) {
       treeItems.push({
@@ -547,6 +553,14 @@ export async function run() {
     }
 
     // Remove .github files from the release tree, except the workflow that handles published releases.
+    if (releaseWorkflowFile) {
+      const trackedWorkflow = await exec.exec('git', ['ls-files', '--error-unmatch', '--', releaseWorkflowFile], {
+        ignoreReturnCode: true
+      });
+      if (trackedWorkflow !== 0) {
+        throw new Error(`release_workflow_file ${releaseWorkflowFile} does not exist in the source tree`);
+      }
+    }
     const githubRmArgs = ['rm', '-r', '--ignore-unmatch'];
     if (releaseWorkflowFile) {
       githubRmArgs.push('--', '.github', `:!${releaseWorkflowFile}`);

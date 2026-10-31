@@ -973,6 +973,8 @@ describe('Publish GitHub Action', () => {
       mockOctokit.rest.git.getTree.mockResolvedValue({
         data: {
           tree: [
+            { path: '.github', mode: '040000', type: 'tree', sha: 'github-tree' },
+            { path: '.github/workflows', mode: '040000', type: 'tree', sha: 'workflows-tree' },
             { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' },
             { path: '.github/workflows/test.yml', mode: '100644', type: 'blob', sha: 'workflow2' },
             { path: '.github/workflows/publish.yml', mode: '100644', type: 'blob', sha: 'publish-workflow' },
@@ -1019,6 +1021,37 @@ describe('Publish GitHub Action', () => {
       );
       expect(deletedGithubFiles).toHaveLength(3);
       expect(deletedGithubFiles.some(file => file.path === '.github/workflows/publish.yml')).toBe(false);
+      expect(deletedGithubFiles.some(file => file.path === '.github/workflows')).toBe(false);
+      expect(createTreeCall.tree).not.toContainEqual(expect.objectContaining({ path: '.github/workflows', sha: null }));
+    });
+
+    test('should fail when the configured release workflow is absent from the API source tree', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: '.github', mode: '040000', type: 'tree', sha: 'github-tree' },
+            { path: '.github/workflows', mode: '040000', type: 'tree', sha: 'workflows-tree' },
+            { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' }
+          ]
+        }
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file .github/workflows/publish.yml does not exist in the source tree'
+      );
+      expect(mockOctokit.rest.git.createTree).not.toHaveBeenCalled();
     });
   });
 
@@ -1044,6 +1077,11 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
+      expect(mockExec.exec).toHaveBeenCalledWith(
+        'git',
+        ['ls-files', '--error-unmatch', '--', '.github/workflows/publish.yml'],
+        { ignoreReturnCode: true }
+      );
       expect(mockExec.exec).toHaveBeenCalledWith('git', [
         'rm',
         '-r',
@@ -1052,6 +1090,32 @@ describe('Publish GitHub Action', () => {
         '.github',
         ':!.github/workflows/publish.yml'
       ]);
+    });
+
+    test('should fail when the configured release workflow is untracked', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'true',
+          commit_dist_folder: 'false',
+          npm_package_command: '',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+      mockExec.exec.mockImplementation((cmd, args) => {
+        if (cmd === 'git' && args?.[0] === 'ls-files') {
+          return Promise.resolve(1);
+        }
+        return Promise.resolve(0);
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file .github/workflows/publish.yml does not exist in the source tree'
+      );
+      expect(mockExec.exec).not.toHaveBeenCalledWith('git', expect.arrayContaining(['rm', '-r', '--ignore-unmatch']));
     });
 
     test('should use git CLI when committing node_modules', async () => {
