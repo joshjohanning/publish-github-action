@@ -141,6 +141,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           create_release_as_draft: true
+          release_workflow_file: .github/workflows/publish.yml
           draft_release_pr_reminder: true
 
   promote:
