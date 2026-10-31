@@ -35,6 +35,7 @@ const mockOctokit = {
       listTags: jest.fn(),
       listReleases: jest.fn(),
       createRelease: jest.fn(),
+      getRelease: jest.fn(),
       listPullRequestsAssociatedWithCommit: jest.fn()
     },
     git: {
@@ -46,6 +47,7 @@ const mockOctokit = {
       updateRef: jest.fn(),
       deleteRef: jest.fn(),
       createTag: jest.fn(),
+      getTag: jest.fn(),
       createRef: jest.fn()
     },
     issues: {
@@ -107,6 +109,8 @@ jest.unstable_mockModule('semver', () => ({
   minor: mockSemver.minor,
   valid: realSemver.default.valid,
   lt: realSemver.default.lt,
+  gt: realSemver.default.gt,
+  prerelease: realSemver.default.prerelease,
   rcompare: realSemver.default.rcompare
 }));
 
@@ -159,9 +163,18 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
     mockOctokit.paginate.mockResolvedValue([]);
     mockOctokit.paginate.iterator.mockImplementation(() => asyncPages([]));
-    mockOctokit.rest.repos.createRelease.mockResolvedValue({
-      data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
-    });
+    mockOctokit.rest.repos.createRelease.mockImplementation(async params => ({
+      data: {
+        id: 123,
+        tag_name: params.tag_name,
+        draft: params.draft,
+        prerelease: false,
+        html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3'
+      }
+    }));
+    mockOctokit.rest.repos.getRelease.mockImplementation(async ({ release_id }) => ({
+      data: { id: release_id, tag_name: 'v1.2.3', draft: false, prerelease: false }
+    }));
     mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
@@ -176,7 +189,7 @@ describe('Publish GitHub Action', () => {
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
-    mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'abc123' } } });
+    mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'abc123', type: 'commit' } } });
     mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { tree: { sha: 'tree123' } } });
     mockOctokit.rest.git.getTree.mockResolvedValue({ data: { tree: [] } }); // Empty tree by default
     mockOctokit.rest.git.createTree.mockResolvedValue({ data: { sha: 'newtree123' } });
@@ -295,9 +308,13 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should create minor version tag via Git CLI
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2', '-m', 'v1.2', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2']);
+      // Minor version tag is promoted via API after the release is confirmed published
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v1.2', object: 'abc123', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1.2', sha: 'tag123', force: true })
+      );
     });
 
     test('should publish release branch when enabled', async () => {
@@ -578,21 +595,29 @@ describe('Publish GitHub Action', () => {
       );
       mockSemver.major.mockReturnValue(2);
       mockSemver.minor.mockReturnValue(0);
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 123, tag_name: 'v2.0.0', draft: false, prerelease: false }
+      });
 
       await run();
 
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v2.0.0']);
       // Should create annotated tags via Git CLI
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2.0.0', '-m', 'v2.0.0', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2', '-m', 'v2', 'commit123']);
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2' }));
     });
 
     test('should always create major version tag', async () => {
       await run();
 
-      // Major version tag should always be created via Git CLI
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1', '-m', 'v1', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1']);
+      // Major version tag is promoted via API for non-draft releases
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v1', message: 'v1', object: 'abc123', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1', sha: 'tag123', force: true })
+      );
+      expect(mockExec.exec).not.toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1']);
     });
   });
 
@@ -1957,6 +1982,192 @@ describe('Publish GitHub Action', () => {
     });
   });
 
+  describe('Floating tag promotion', () => {
+    const setInputs = overrides => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package',
+          ...overrides
+        };
+        return inputs[name] || '';
+      });
+    };
+
+    beforeEach(() => {
+      mockSemver.major.mockImplementation(realSemver.default.major);
+      mockSemver.minor.mockImplementation(realSemver.default.minor);
+    });
+
+    const releaseEvent = release => {
+      mockGithub.context.eventName = 'release';
+      mockGithub.context.payload = { action: 'published', release };
+    };
+
+    afterEach(() => {
+      delete mockGithub.context.eventName;
+      delete mockGithub.context.payload;
+    });
+
+    test('should only push the exact version tag for draft releases', async () => {
+      setInputs({ create_release_as_draft: 'true', publish_minor_version: 'true' });
+
+      await run();
+
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalledWith(expect.objectContaining({ draft: true }));
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.createRef).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1' }));
+      expect(mockOctokit.rest.repos.getRelease).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('floating version tags will not move'));
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should fail on an invalid mode', async () => {
+      setInputs({ mode: 'bogus' });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('Invalid mode "bogus"; expected "publish" or "promote"');
+    });
+
+    test('should require a release published event in promote mode', async () => {
+      setInputs({ mode: 'promote' });
+      mockGithub.context.eventName = 'push';
+      mockGithub.context.payload = {};
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('mode: promote requires a release.published event');
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+    });
+
+    test('should promote major and minor tags to the released tag commit without rebuilding', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false }
+      });
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => {
+        if (ref === 'tags/v2.1.2') {
+          return { data: { object: { sha: 'annotated-tag-sha', type: 'tag' } } };
+        }
+        return { data: { object: { sha: 'old-alias-sha', type: 'tag' } } };
+      });
+      mockOctokit.rest.git.getTag.mockResolvedValue({ data: { object: { sha: 'release-commit', type: 'commit' } } });
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([
+          [
+            { id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false },
+            { id: 54, tag_name: 'v2.1.1', draft: false, prerelease: false },
+            { id: 56, tag_name: 'v2.2.0', draft: true, prerelease: false },
+            { id: 57, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true }
+          ]
+        ])
+      );
+
+      await run();
+
+      expect(mockOctokit.rest.repos.getRelease).toHaveBeenCalledWith(expect.objectContaining({ release_id: 55 }));
+      expect(mockOctokit.rest.git.getTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag_sha: 'annotated-tag-sha' })
+      );
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v2', object: 'release-commit', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v2.1', object: 'release-commit', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v2', sha: 'tag123', force: true })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v2.1', sha: 'tag123', force: true })
+      );
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should create the floating tag ref when it does not exist yet', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 1, tag_name: 'v4.0.0', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 1, tag_name: 'v4.0.0', draft: false, prerelease: false }
+      });
+      const notFound = new Error('Not Found');
+      notFound.status = 404;
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => {
+        if (ref === 'tags/v4.0.0') {
+          return { data: { object: { sha: 'release-commit', type: 'commit' } } };
+        }
+        throw notFound;
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'refs/tags/v4', sha: 'tag123' })
+      );
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not move the major tag backwards when publishing a backport', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false }
+      });
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([
+          [
+            { id: 11, tag_name: 'v2.1.0', draft: false, prerelease: false },
+            { id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false }
+          ]
+        ])
+      );
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2' }));
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2.0' }));
+      expect(mockCore.info).toHaveBeenCalledWith(
+        'Skipping major alias v2; a newer stable release is already published'
+      );
+    });
+
+    test('should skip promotion for prereleases', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 3, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 3, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('is a prerelease'));
+    });
+
+    test('should fail when the live release is still a draft', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 4, tag_name: 'v1.2.3', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 4, tag_name: 'v1.2.3', draft: true, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('The release event does not match a live, published release');
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateRef retry behavior', () => {
     beforeEach(() => {
       jest.useFakeTimers();
@@ -1989,7 +2200,10 @@ describe('Publish GitHub Action', () => {
 
       await resultPromise;
 
-      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
+      const branchUpdateCalls = mockOctokit.rest.git.updateRef.mock.calls.filter(([args]) =>
+        args.ref.startsWith('heads/')
+      );
+      expect(branchUpdateCalls).toHaveLength(2);
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });

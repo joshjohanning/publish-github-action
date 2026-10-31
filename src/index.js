@@ -302,29 +302,191 @@ function buildReleaseCommentBody(version, releaseUrl) {
 }
 
 /**
+ * Resolve an annotated or lightweight tag to its commit SHA.
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {string} tagName - Tag name to resolve
+ * @returns {Promise<string>} Commit SHA
+ */
+async function getTagCommit(octokit, context, tagName) {
+  const { data: ref } = await octokit.rest.git.getRef({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    ref: `tags/${tagName}`
+  });
+
+  let object = ref.object;
+  for (let depth = 0; object?.type === 'tag' && depth < 10; depth++) {
+    const { data: tag } = await octokit.rest.git.getTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag_sha: object.sha
+    });
+    object = tag.object;
+  }
+
+  if (object?.type !== 'commit' || !object.sha) {
+    throw new Error(`Tag ${tagName} does not resolve to a commit`);
+  }
+
+  return object.sha;
+}
+
+/**
+ * Confirm a release is published and promote its eligible floating version tags.
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {object} release - Release returned by GitHub
+ * @param {boolean} publishMinorVersion - Whether to promote the minor alias
+ */
+async function promoteReleaseTags(octokit, context, release, publishMinorVersion) {
+  if (release.draft) {
+    throw new Error(`Release ${release.tag_name} must be published before promoting tags`);
+  }
+
+  const version = release.tag_name;
+  if (!semver.valid(version)) {
+    throw new Error(`Release tag ${version} is not a valid semantic version`);
+  }
+
+  if (release.prerelease || semver.prerelease(version)) {
+    core.info(`Release ${version} is a prerelease; not promoting floating version tags`);
+    return;
+  }
+
+  const currentCommit = await getTagCommit(octokit, context, version);
+  const releases = [];
+  for await (const { data: page } of octokit.paginate.iterator(octokit.rest.repos.listReleases, {
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    per_page: 100
+  })) {
+    releases.push(...page);
+  }
+
+  // Include the confirmed release in case the release list has not caught up yet.
+  if (!releases.some(item => item.id === release.id)) {
+    releases.push(release);
+  }
+
+  const stableVersions = releases
+    .filter(item => item && !item.draft && !item.prerelease && semver.valid(item.tag_name))
+    .filter(item => !semver.prerelease(item.tag_name))
+    .map(item => item.tag_name);
+  const [major, minor] = version.slice(1).split('.');
+  const isLatestForMajor = stableVersions.every(
+    candidate => semver.major(candidate) !== Number(major) || !semver.gt(candidate, version)
+  );
+  const isLatestForMinor = stableVersions.every(
+    candidate =>
+      semver.major(candidate) !== Number(major) ||
+      semver.minor(candidate) !== Number(minor) ||
+      !semver.gt(candidate, version)
+  );
+
+  const aliases = [];
+  if (isLatestForMajor) {
+    aliases.push(`v${major}`);
+  } else {
+    core.info(`Skipping major alias v${major}; a newer stable release is already published`);
+  }
+  if (publishMinorVersion) {
+    if (isLatestForMinor) {
+      aliases.push(`v${major}.${minor}`);
+    } else {
+      core.info(`Skipping minor alias v${major}.${minor}; a newer stable release is already published`);
+    }
+  }
+
+  for (const alias of aliases) {
+    const tag = await octokit.rest.git.createTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag: alias,
+      message: alias,
+      object: currentCommit,
+      type: 'commit',
+      tagger: {
+        name: 'github-actions[bot]',
+        email: 'github-actions[bot]@users.noreply.github.com',
+        date: new Date().toISOString()
+      }
+    });
+    const ref = `tags/${alias}`;
+    try {
+      await octokit.rest.git.getRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref
+      });
+      await octokit.rest.git.updateRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref,
+        sha: tag.data.sha,
+        force: true
+      });
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+      await octokit.rest.git.createRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `refs/${ref}`,
+        sha: tag.data.sha
+      });
+    }
+    core.info(`Promoted annotated tag ${alias} to ${version}`);
+  }
+}
+
+/**
  * Main action logic
  */
 export async function run() {
   try {
     const githubToken = core.getInput('github_token', { required: true });
     const githubApiUrl = core.getInput('github_api_url', { required: false });
+    const mode = core.getInput('mode', { required: false }) || 'publish';
+    if (mode !== 'publish' && mode !== 'promote') {
+      throw new Error(`Invalid mode "${mode}"; expected "publish" or "promote"`);
+    }
+
+    const context = github.context;
+    const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
+    const octokit = github.getOctokit(githubToken, opts);
+    const publishMinorVersion = core.getInput('publish_minor_version', { required: false }) === 'true';
+
+    if (mode === 'promote') {
+      const eventRelease = context.payload?.release;
+      if (context.eventName !== 'release' || context.payload?.action !== 'published' || !eventRelease?.id) {
+        throw new Error('mode: promote requires a release.published event');
+      }
+
+      const { data: release } = await octokit.rest.repos.getRelease({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        release_id: eventRelease.id
+      });
+      if (release.id !== eventRelease.id || release.tag_name !== eventRelease.tag_name || release.draft) {
+        throw new Error('The release event does not match a live, published release');
+      }
+      await promoteReleaseTags(octokit, context, release, publishMinorVersion);
+      core.info('✅ Action completed successfully!');
+      return;
+    }
+
     const npmPackageCommand = core.getInput('npm_package_command', { required: false });
     const commitNodeModules = core.getInput('commit_node_modules', { required: false });
     const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
-    const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
     const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
 
-    const context = github.context;
-    const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
-    const octokit = github.getOctokit(githubToken, opts);
-
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
-    const minorVersion = `v${semver.major(json.version)}.${semver.minor(json.version)}`;
-    const majorVersion = `v${semver.major(json.version)}`;
     const branchName = `releases/${version}`;
 
     const tags = await octokit.rest.repos.listTags({
@@ -411,25 +573,9 @@ export async function run() {
     await exec.exec('git', ['tag', '-fa', version, '-m', version, commitSha]);
     core.info(`Created annotated tag ${version}`);
 
-    if (publishMinorVersion === 'true') {
-      await exec.exec('git', ['tag', '-fa', minorVersion, '-m', minorVersion, commitSha]);
-      core.info(`Created annotated tag ${minorVersion}`);
-    }
-
-    await exec.exec('git', ['tag', '-fa', majorVersion, '-m', majorVersion, commitSha]);
-    core.info(`Created annotated tag ${majorVersion}`);
-
-    // Push tags atomically (force push to update existing tags)
+    // The exact release tag is immutable; floating aliases are promoted only after publication.
     await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${version}`]);
     core.info(`Pushed tag ${version}`);
-
-    if (publishMinorVersion === 'true') {
-      await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${minorVersion}`]);
-      core.info(`Pushed tag ${minorVersion}`);
-    }
-
-    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${majorVersion}`]);
-    core.info(`Pushed tag ${majorVersion}`);
 
     // Clean up release branch if not publishing
     if (publishReleaseVersion !== 'true') {
@@ -512,6 +658,22 @@ export async function run() {
       body: releaseNotes,
       draft: createReleaseAsDraft === 'true'
     });
+
+    if (!release.data.draft) {
+      const { data: confirmedRelease } = await octokit.rest.repos.getRelease({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        release_id: release.data.id
+      });
+      if (confirmedRelease.draft || confirmedRelease.tag_name !== version) {
+        throw new Error(`Release ${version} could not be confirmed as published`);
+      }
+      await promoteReleaseTags(octokit, context, confirmedRelease, publishMinorVersion);
+    } else {
+      core.info(
+        `Draft release ${version} created; floating version tags will not move until the release is published (use mode: promote on release published)`
+      );
+    }
 
     // Post reminder comment on merged PR if draft release was created
     if (createReleaseAsDraft === 'true' && draftReleasePrReminder !== 'false') {

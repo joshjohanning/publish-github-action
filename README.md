@@ -29,6 +29,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------- |
 | `github_token`              | Token for the GitHub API                                                                                                                                                                                                                                                                                               | Yes      | -                       |
 | `github_api_url`            | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                                                                                                                                                                                            | No       | `${{ github.api_url }}` |
+| `mode`                      | `publish` builds, tags, and creates the release. `promote` moves the floating major (and, with `publish_minor_version`, minor) tags to an already published release; use it on the `release` `published` event (see [Draft releases](#draft-releases-and-floating-tags))                                               | No       | `publish`               |
 | `npm_package_command`       | Command to build the action                                                                                                                                                                                                                                                                                            | No       | `npm run package`       |
 | `commit_node_modules`       | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts                                                                                                                                                                      | No       | `false`                 |
 | `commit_dist_folder`        | Whether to commit `dist` folder                                                                                                                                                                                                                                                                                        | No       | `true`                  |
@@ -37,6 +38,17 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `create_release_as_draft`   | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing           | No       | `false`                 |
 | `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release                                                                                                                                                                                                                                                 | No       | `false`                 |
 | `comment_on_linked_issues`  | Comment on closed issues linked to PRs in the release notes to notify followers of the release (uses GraphQL `closingIssuesReferences`; idempotent — updates existing comment on rerun). Comments are posted for both published and draft releases; the comment is updated if the version changes on a subsequent run. | No       | `false`                 |
+
+### Draft Releases and Floating Tags
+
+When `create_release_as_draft: true`, only the exact version tag (e.g. `v2.1.2`) is pushed. The floating major tag (e.g. `v2`) and optional minor tag (e.g. `v2.1`) are **not** moved until the release is published, so consumers of `@v2` never pick up an unreleased draft.
+
+To promote the floating tags once you publish the draft, run this action again with `mode: promote` on the `release` `published` event. Promotion points the floating tags at the exact release tag's existing bundled commit (no rebuild), and only moves a tag if the release is the newest stable release for that major/minor line (so publishing a backport won't move `v2` backwards). Prereleases are skipped.
+
+For non-draft releases (`create_release_as_draft: false`), the floating tags are promoted immediately after the release is created.
+
+> [!NOTE]
+> Releases published by `GITHUB_TOKEN` do not trigger other workflows, which is why non-draft releases promote in the same run. Drafts published manually in the UI trigger the `release` `published` event normally.
 
 ### Commit Signing Behavior
 
@@ -56,7 +68,7 @@ The action requires specific permissions depending on features used:
 
 | Permission             | Required | Purpose                                                                |
 | ---------------------- | -------- | ---------------------------------------------------------------------- |
-| `contents: write`      | Yes      | Push tags and create releases                                          |
+| `contents: write`      | Yes      | Push tags, create releases, and promote floating tags                  |
 | `pull-requests: write` | No       | Post reminder comment on merged PR (`draft_release_pr_reminder: true`) |
 | `issues: write`        | No       | Comment on linked issues (`comment_on_linked_issues: true`)            |
 
@@ -98,4 +110,44 @@ jobs:
           publish_release_branch: false
           create_release_as_draft: false
           draft_release_pr_reminder: true
+```
+
+### Example Workflow with Draft Releases
+
+```yml
+name: 'Publish GitHub Action'
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  publish:
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: joshjohanning/publish-github-action@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          create_release_as_draft: true
+          draft_release_pr_reminder: true
+
+  promote:
+    if: github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: joshjohanning/publish-github-action@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          mode: promote
 ```
