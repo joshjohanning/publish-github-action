@@ -12,6 +12,11 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: ${{ github.workflow }}-publish
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   publish:
     if: github.event_name != 'release'

@@ -48,6 +48,10 @@ To promote the floating tags once you publish the draft, run this action again w
 
 For non-draft releases (`create_release_as_draft: false`), the floating tags are promoted immediately after the release is created.
 
+Serialize all publication and promotion entry points in the repository with the **same concurrency group** and `cancel-in-progress: false`. This keeps the newest-release eligibility check and alias updates inside one serialized execution, preventing an older run from overwriting a newer promotion. The examples use `${{ github.workflow }}-publish`; if publication and promotion live in differently named workflows, use the same fixed group (for example, `Publish GitHub Action-publish`) in each instead. Do not include the branch, tag, or event in the group.
+
+`queue: max` retains up to 100 pending runs instead of replacing the single pending run. The examples target GitHub.com; verify support on your GHES version and use an actionlint version that recognizes this property. Removing `queue: max` on an unsupported host still serializes execution but allows pending runs to be replaced, so a canceled promotion must be rerun.
+
 > [!NOTE]
 > Releases published by `GITHUB_TOKEN` do not trigger other workflows, which is why non-draft releases promote in the same run. Drafts published manually in the UI trigger the `release` `published` event normally. If the workflow file is removed from release commits, set `release_workflow_file` to its path so the released tag retains the listener.
 
@@ -94,6 +98,11 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-publish
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -128,6 +137,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-publish
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   publish:
