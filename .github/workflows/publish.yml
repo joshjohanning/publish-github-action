@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -12,12 +14,20 @@ permissions:
 
 jobs:
   publish:
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: main
           persist-credentials: false
-      - uses: joshjohanning/publish-github-action@v3
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci --ignore-scripts --allow-git=none
+      - run: npm run package
+      - uses: ./
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
@@ -25,5 +35,26 @@ jobs:
           publish_minor_version: false
           publish_release_branch: false
           create_release_as_draft: true
+          release_workflow_file: .github/workflows/publish.yml
           draft_release_pr_reminder: true
           comment_on_linked_issues: true
+
+  promote:
+    if: github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci --ignore-scripts --allow-git=none
+      - run: npm run package
+      - uses: ./
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          mode: promote
+          publish_minor_version: false

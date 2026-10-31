@@ -30,6 +30,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `github_token`              | Token for the GitHub API                                                                                                                                                                                                                                                                                               | Yes      | -                       |
 | `github_api_url`            | GitHub API URL (e.g., `https://api.github.com` for GitHub.com or `https://ghes.domain.com/api/v3` for GHES)                                                                                                                                                                                                            | No       | `${{ github.api_url }}` |
 | `mode`                      | `publish` builds, tags, and creates the release. `promote` moves the floating major (and, with `publish_minor_version`, minor) tags to an already published release; use it on the `release` `published` event (see [Draft releases](#draft-releases-and-floating-tags))                                               | No       | `publish`               |
+| `release_workflow_file`     | Optional workflow file to keep in the release tag so it can handle `release.published`; must be under `.github/workflows/`                                                                                                                                                                                             | No       | -                       |
 | `npm_package_command`       | Command to build the action                                                                                                                                                                                                                                                                                            | No       | `npm run package`       |
 | `commit_node_modules`       | Whether to commit `node_modules` folder. **Note:** When set to `true`, commits will NOT be verified due to API limitations with large file counts                                                                                                                                                                      | No       | `false`                 |
 | `commit_dist_folder`        | Whether to commit `dist` folder                                                                                                                                                                                                                                                                                        | No       | `true`                  |
@@ -48,7 +49,7 @@ To promote the floating tags once you publish the draft, run this action again w
 For non-draft releases (`create_release_as_draft: false`), the floating tags are promoted immediately after the release is created.
 
 > [!NOTE]
-> Releases published by `GITHUB_TOKEN` do not trigger other workflows, which is why non-draft releases promote in the same run. Drafts published manually in the UI trigger the `release` `published` event normally.
+> Releases published by `GITHUB_TOKEN` do not trigger other workflows, which is why non-draft releases promote in the same run. Drafts published manually in the UI trigger the `release` `published` event normally. If the workflow file is removed from release commits, set `release_workflow_file` to its path so the released tag retains the listener.
 
 ### Commit Signing Behavior
 
@@ -60,7 +61,7 @@ For non-draft releases (`create_release_as_draft: false`), the floating tags are
 The action automatically handles clean builds and file management:
 
 - **Dist folder cleaning**: When `commit_dist_folder: true` and `npm_package_command` is specified, the `dist/` folder is cleaned before building to ensure no stale files persist
-- **Automatic file deletion**: The action removes `.github/` files from release commits and properly handles renamed/deleted files in the `dist/` folder
+- **Automatic file deletion**: The action removes `.github/` files from release commits and properly handles renamed/deleted files in the `dist/` folder; `release_workflow_file` can preserve the published-release listener when needed
 
 ## Permissions
 

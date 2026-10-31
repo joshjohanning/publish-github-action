@@ -957,13 +957,14 @@ describe('Publish GitHub Action', () => {
       expect(addedFiles).toHaveLength(3);
     });
 
-    test('should remove .github folder in API path', async () => {
+    test('should preserve the selected release workflow in the API path', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
           commit_node_modules: 'false',
           commit_dist_folder: 'true',
-          npm_package_command: 'npm run package'
+          npm_package_command: 'npm run package',
+          release_workflow_file: '.github/workflows/publish.yml'
         };
         return inputs[name] || '';
       });
@@ -974,6 +975,7 @@ describe('Publish GitHub Action', () => {
           tree: [
             { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' },
             { path: '.github/workflows/test.yml', mode: '100644', type: 'blob', sha: 'workflow2' },
+            { path: '.github/workflows/publish.yml', mode: '100644', type: 'blob', sha: 'publish-workflow' },
             { path: '.github/dependabot.yml', mode: '100644', type: 'blob', sha: 'dependabot' },
             { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'dist1' },
             { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
@@ -990,7 +992,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should mark all .github files for deletion
+      // Other .github files are removed, but the selected workflow remains in the release tree.
       expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
         expect.objectContaining({
           tree: expect.arrayContaining([
@@ -1006,20 +1008,52 @@ describe('Publish GitHub Action', () => {
               path: '.github/dependabot.yml',
               sha: null
             })
-          ])
+          ]),
+          base_tree: 'tree123'
         })
       );
 
-      // Verify .github files are marked for deletion
       const createTreeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
       const deletedGithubFiles = createTreeCall.tree.filter(
         item => item.sha === null && item.path.startsWith('.github/')
       );
       expect(deletedGithubFiles).toHaveLength(3);
+      expect(deletedGithubFiles.some(file => file.path === '.github/workflows/publish.yml')).toBe(false);
     });
   });
 
   describe('Git CLI path', () => {
+    test('should preserve the selected release workflow when removing .github files', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'true',
+          commit_dist_folder: 'false',
+          npm_package_command: '',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+
+      mockExec.exec.mockImplementation((cmd, args, options) => {
+        if (cmd === 'git' && args?.[0] === 'rev-parse' && args?.[1] === 'HEAD') {
+          options?.listeners?.stdout?.(Buffer.from('gitcommitsha123\n'));
+        }
+        return Promise.resolve(0);
+      });
+
+      await run();
+
+      expect(mockExec.exec).toHaveBeenCalledWith('git', [
+        'rm',
+        '-r',
+        '--ignore-unmatch',
+        '--',
+        '.github',
+        ':!.github/workflows/publish.yml'
+      ]);
+    });
+
     test('should use git CLI when committing node_modules', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -2090,6 +2124,20 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
       expect(mockCore.setFailed).not.toHaveBeenCalled();
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should derive aliases correctly for a semantic version without a v prefix', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 58, tag_name: '1.2.3', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 58, tag_name: '1.2.3', draft: false, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1' }));
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1.2' }));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
     });
 
     test('should create the floating tag ref when it does not exist yet', async () => {

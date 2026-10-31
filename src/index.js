@@ -112,9 +112,10 @@ export async function retryWithBackoff(
  * @param {string} branchName - Name of the branch to commit to
  * @param {string} version - Version being released
  * @param {string} commitDistFolder - Whether to commit dist folder
+ * @param {string} releaseWorkflowFile - Optional workflow file to keep in the release tree
  * @returns {string} The SHA of the new commit
  */
-async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder) {
+async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder, releaseWorkflowFile) {
   try {
     core.info('Creating verified commit via GitHub API...');
 
@@ -152,8 +153,10 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
       existingTree = [];
     }
 
-    // Always remove .github folder from release commits
-    const githubFiles = existingTree.filter(item => item.path.startsWith('.github/'));
+    // Remove .github files from release commits, except the selected published-release workflow.
+    const githubFiles = existingTree.filter(
+      item => item.path.startsWith('.github/') && item.path !== releaseWorkflowFile
+    );
     for (const file of githubFiles) {
       treeItems.push({
         path: file.path,
@@ -373,15 +376,14 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
     .filter(item => item && !item.draft && !item.prerelease && semver.valid(item.tag_name))
     .filter(item => !semver.prerelease(item.tag_name))
     .map(item => item.tag_name);
-  const [major, minor] = version.slice(1).split('.');
+  const major = semver.major(version);
+  const minor = semver.minor(version);
   const isLatestForMajor = stableVersions.every(
-    candidate => semver.major(candidate) !== Number(major) || !semver.gt(candidate, version)
+    candidate => semver.major(candidate) !== major || !semver.gt(candidate, version)
   );
   const isLatestForMinor = stableVersions.every(
     candidate =>
-      semver.major(candidate) !== Number(major) ||
-      semver.minor(candidate) !== Number(minor) ||
-      !semver.gt(candidate, version)
+      semver.major(candidate) !== major || semver.minor(candidate) !== minor || !semver.gt(candidate, version)
   );
 
   const aliases = [];
@@ -413,12 +415,21 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
       }
     });
     const ref = `tags/${alias}`;
+    let refExists = true;
     try {
       await octokit.rest.git.getRef({
         owner: context.repo.owner,
         repo: context.repo.repo,
         ref
       });
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+      refExists = false;
+    }
+
+    if (refExists) {
       await octokit.rest.git.updateRef({
         owner: context.repo.owner,
         repo: context.repo.repo,
@@ -426,10 +437,7 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
         sha: tag.data.sha,
         force: true
       });
-    } catch (error) {
-      if (error.status !== 404) {
-        throw error;
-      }
+    } else {
       await octokit.rest.git.createRef({
         owner: context.repo.owner,
         repo: context.repo.repo,
@@ -480,6 +488,15 @@ export async function run() {
     const npmPackageCommand = core.getInput('npm_package_command', { required: false });
     const commitNodeModules = core.getInput('commit_node_modules', { required: false });
     const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
+    const releaseWorkflowFile = core.getInput('release_workflow_file', { required: false }).replace(/\\/g, '/');
+    if (
+      releaseWorkflowFile &&
+      (!releaseWorkflowFile.startsWith('.github/workflows/') ||
+        releaseWorkflowFile.includes('..') ||
+        !/\.(yml|yaml)$/.test(releaseWorkflowFile))
+    ) {
+      throw new Error('release_workflow_file must be a workflow path under .github/workflows/');
+    }
     const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
@@ -529,10 +546,14 @@ export async function run() {
       await exec.exec('git add -f dist');
     }
 
-    // Remove .github folder from local git (for Git CLI path)
-    // API path also removes .github by marking files for deletion in the tree
-    // Use --ignore-unmatch to avoid failure if .github doesn't exist
-    await exec.exec('git', ['rm', '-r', '--ignore-unmatch', '.github']);
+    // Remove .github files from the release tree, except the workflow that handles published releases.
+    const githubRmArgs = ['rm', '-r', '--ignore-unmatch'];
+    if (releaseWorkflowFile) {
+      githubRmArgs.push('--', '.github', `:!${releaseWorkflowFile}`);
+    } else {
+      githubRmArgs.push('.github');
+    }
+    await exec.exec('git', githubRmArgs);
 
     // Use API for verified commits when not committing node_modules
     // Otherwise fall back to git CLI (node_modules too large for API)
@@ -559,7 +580,14 @@ export async function run() {
       // Push branch first so API can reference it
       await exec.exec('git', ['push', 'origin', branchName]);
 
-      commitSha = await createCommitViaAPI(octokit, context, branchName, version, commitDistFolder);
+      commitSha = await createCommitViaAPI(
+        octokit,
+        context,
+        branchName,
+        version,
+        commitDistFolder,
+        releaseWorkflowFile
+      );
 
       // Fetch the commit created via API so local git knows about it
       await exec.exec('git', ['fetch', 'origin', branchName]);
