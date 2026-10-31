@@ -2131,6 +2131,17 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.setFailed).toHaveBeenCalledWith('Invalid mode "bogus"; expected "publish" or "promote"');
     });
 
+    test('should reject a release workflow in a nested directory', async () => {
+      setInputs({ release_workflow_file: '.github/workflows/nested/publish.yml' });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file must be a workflow path under .github/workflows/'
+      );
+      expect(mockExec.exec).not.toHaveBeenCalled();
+    });
+
     test('should require a release published event in promote mode', async () => {
       setInputs({ mode: 'promote' });
       mockGithub.context.eventName = 'push';

@@ -497,9 +497,7 @@ export async function run() {
     const releaseWorkflowFile = core.getInput('release_workflow_file', { required: false }).replace(/\\/g, '/');
     if (
       releaseWorkflowFile &&
-      (!releaseWorkflowFile.startsWith('.github/workflows/') ||
-        releaseWorkflowFile.includes('..') ||
-        !/\.(yml|yaml)$/.test(releaseWorkflowFile))
+      (!/^\.github\/workflows\/[^/]+\.(yml|yaml)$/.test(releaseWorkflowFile) || releaseWorkflowFile.includes('..'))
     ) {
       throw new Error('release_workflow_file must be a workflow path under .github/workflows/');
     }

@@ -17,7 +17,7 @@ inputs:
     default: 'publish'
     required: false
   release_workflow_file:
-    description: 'Optional .github/workflows/*.yml or *.yaml file to retain in the release tag so it can handle release.published'
+    description: 'Optional .yml or .yaml file directly under .github/workflows/ to retain in the release tag so it can handle release.published'
     required: false
   npm_package_command:
     description: 'Command to build the action'
