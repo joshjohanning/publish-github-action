@@ -12,6 +12,13 @@ inputs:
     description: 'GitHub API URL (e.g., https://api.github.com for GitHub.com or https://ghes.domain.com/api/v3 for GHES)'
     required: false
     default: '${{ github.api_url }}'
+  mode:
+    description: 'publish (default) builds, tags, and creates the release. promote moves the floating major (and optional minor) tags to an already published release; run it on the release published event.'
+    default: 'publish'
+    required: false
+  release_workflow_file:
+    description: 'Optional .yml or .yaml file directly under .github/workflows/ to retain in the release tag so it can handle release.published'
+    required: false
   npm_package_command:
     description: 'Command to build the action'
     default: 'npm run package'
@@ -33,7 +40,7 @@ inputs:
     default: 'false'
     required: false
   create_release_as_draft:
-    description: 'Change to true to create release as draft'
+    description: 'Change to true to create release as draft. Only the exact version tag is pushed; floating major/minor tags are not moved until the release is published (see mode: promote)'
     default: 'false'
     required: false
   draft_release_pr_reminder:
