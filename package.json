@@ -1,6 +1,6 @@
 {
   "name": "publish-github-action",
-  "version": "3.1.14",
+  "version": "3.3.0",
   "type": "module",
   "private": true,
   "description": "Publish your GitHub Action",
@@ -37,7 +37,7 @@
     "@actions/core": "^3.0.1",
     "@actions/exec": "^3.0.0",
     "@actions/github": "^9.1.1",
-    "semver": "^7.8.5"
+    "semver": "^7.8.6"
   },
   "devDependencies": {
     "@joshjohanning/make-coverage-badge-better": "^1.0.1",
@@ -50,6 +50,6 @@
     "eslint-plugin-prettier": "^5.5.7",
     "globals": "^17.14.0",
     "jest": "^30.5.2",
-    "prettier": "^3.9.10"
+    "prettier": "^3.10.1"
   }
 }
