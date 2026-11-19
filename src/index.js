@@ -407,6 +407,20 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
   }
 
   for (const alias of aliases) {
+    const ref = `tags/${alias}`;
+    let refExists = true;
+    try {
+      if ((await getTagCommit(octokit, context, alias)) === currentCommit) {
+        core.info(`Floating tag ${alias} already points to ${version}`);
+        continue;
+      }
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+      refExists = false;
+    }
+
     const tag = await octokit.rest.git.createTag({
       owner: context.repo.owner,
       repo: context.repo.repo,
@@ -420,21 +434,6 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
         date: new Date().toISOString()
       }
     });
-    const ref = `tags/${alias}`;
-    let refExists = true;
-    try {
-      await octokit.rest.git.getRef({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        ref
-      });
-    } catch (error) {
-      if (error.status !== 404) {
-        throw error;
-      }
-      refExists = false;
-    }
-
     if (refExists) {
       await octokit.rest.git.updateRef({
         owner: context.repo.owner,
@@ -474,17 +473,36 @@ export async function run() {
 
     if (mode === 'promote') {
       const eventRelease = context.payload?.release;
-      if (context.eventName !== 'release' || context.payload?.action !== 'published' || !eventRelease?.id) {
-        throw new Error('mode: promote requires a release.published event');
-      }
-
-      const { data: release } = await octokit.rest.repos.getRelease({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        release_id: eventRelease.id
-      });
-      if (release.id !== eventRelease.id || release.tag_name !== eventRelease.tag_name || release.draft) {
-        throw new Error('The release event does not match a live, published release');
+      const releaseTag = core.getInput('release_tag', { required: false }).trim();
+      let release;
+      if (context.eventName === 'release' && ['published', 'released'].includes(context.payload?.action)) {
+        if (!eventRelease?.id) {
+          throw new Error('The release event payload does not include a release');
+        }
+        ({ data: release } = await octokit.rest.repos.getRelease({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          release_id: eventRelease.id
+        }));
+        if (release.id !== eventRelease.id || release.tag_name !== eventRelease.tag_name || release.draft) {
+          throw new Error('The release event does not match a live, published release');
+        }
+      } else if (releaseTag) {
+        // Manual recovery: e.g. drafts created before the release listener existed in the tagged commit
+        try {
+          ({ data: release } = await octokit.rest.repos.getReleaseByTag({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            tag: releaseTag
+          }));
+        } catch (error) {
+          if (error.status === 404) {
+            throw new Error(`No published release found for tag ${releaseTag}`);
+          }
+          throw error;
+        }
+      } else {
+        throw new Error('mode: promote requires a release published/released event or the release_tag input');
       }
       await promoteReleaseTags(octokit, context, release, publishMinorVersion);
       core.info('✅ Action completed successfully!');
@@ -510,13 +528,31 @@ export async function run() {
     const version = `v${json.version}`;
     const branchName = `releases/${version}`;
 
-    const tags = await octokit.rest.repos.listTags({
+    // Exact-ref lookup; listing tags is paginated and would miss older versions
+    const { data: matchingRefs } = await octokit.rest.git.listMatchingRefs({
       owner: context.repo.owner,
-      repo: context.repo.repo
+      repo: context.repo.repo,
+      ref: `tags/${version}`
     });
 
-    if (tags.data.some(tag => tag.name === version)) {
+    if (matchingRefs.some(ref => ref.ref === `refs/tags/${version}`)) {
       core.info(`Tag ${version} already exists`);
+      // Let a rerun finish promotion if a previous run published the release but failed before moving aliases.
+      let existingRelease;
+      try {
+        ({ data: existingRelease } = await octokit.rest.repos.getReleaseByTag({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          tag: version
+        }));
+      } catch (error) {
+        if (error.status !== 404) {
+          throw error;
+        }
+      }
+      if (existingRelease && !existingRelease.draft) {
+        await promoteReleaseTags(octokit, context, existingRelease, publishMinorVersion);
+      }
       return;
     }
 
@@ -614,7 +650,7 @@ export async function run() {
     core.info(`Created annotated tag ${version}`);
 
     // The exact release tag is immutable; floating aliases are promoted only after publication.
-    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${version}`]);
+    await exec.exec('git', ['push', 'origin', `refs/tags/${version}`]);
     core.info(`Pushed tag ${version}`);
 
     // Clean up release branch if not publishing

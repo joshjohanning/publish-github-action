@@ -1,11 +1,16 @@
 name: 'Publish GitHub Action'
 on:
   workflow_dispatch:
+    inputs:
+      promote_tag:
+        description: 'Only promote floating tags to this published release tag (e.g. v3.2.0); leave empty to publish'
+        required: false
+        default: ''
   push:
     branches:
       - main
   release:
-    types: [published]
+    types: [published, released]
 
 permissions:
   contents: write
@@ -19,12 +24,12 @@ concurrency:
 
 jobs:
   publish:
-    if: github.event_name != 'release'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.promote_tag == '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
@@ -45,15 +50,16 @@ jobs:
           comment_on_linked_issues: true
 
   promote:
-    if: github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease
+    if: (github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.promote_tag != '')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ github.event.release.tag_name || inputs.promote_tag }}
           persist-credentials: false
       - uses: ./
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           mode: promote
+          release_tag: ${{ inputs.promote_tag }}
           publish_minor_version: false

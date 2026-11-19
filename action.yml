@@ -13,11 +13,14 @@ inputs:
     required: false
     default: '${{ github.api_url }}'
   mode:
-    description: 'publish (default) builds, tags, and creates the release. promote moves the floating major (and optional minor) tags to an already published release; run it on the release published event.'
+    description: 'publish (default) builds, tags, and creates the release. promote moves the floating major (and optional minor) tags to an already published release; run it on the release published/released events, or manually with release_tag.'
     default: 'publish'
     required: false
+  release_tag:
+    description: 'Exact release tag (e.g. v2.1.2) to promote in mode: promote when not triggered by a release event, e.g. from workflow_dispatch to recover a release whose tag has no release listener'
+    required: false
   release_workflow_file:
-    description: 'Optional .yml or .yaml file directly under .github/workflows/ to retain in the release tag so it can handle release.published'
+    description: 'Optional .yml or .yaml file directly under .github/workflows/ to retain in the release tag so it can handle release published/released events'
     required: false
   npm_package_command:
     description: 'Command to build the action'
