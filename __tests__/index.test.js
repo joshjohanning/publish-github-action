@@ -131,7 +131,8 @@ describe('Publish GitHub Action', () => {
         publish_minor_version: 'false',
         publish_release_branch: 'false',
         create_release_as_draft: 'false',
-        draft_release_pr_reminder: 'true'
+        draft_release_pr_reminder: 'true',
+        skip_release_label: 'skip-release'
       };
       return inputs[name] || '';
     });
@@ -207,6 +208,61 @@ describe('Publish GitHub Action', () => {
 
       expect(mockExec.exec).not.toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v1.2.3']);
       expect(mockCore.info).not.toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should skip publishing when the merged PR has the skip release label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping release because PR #42 has the "skip-release" label');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a PR that has not merged yet', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: null,
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+    });
+
+    test('should honor a custom skip release label', async () => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? 'no-publish' : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'no-publish' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
 
     test('should handle npm package command', async () => {
@@ -1190,7 +1246,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1216,7 +1272,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1318,7 +1374,7 @@ describe('Publish GitHub Action', () => {
       });
     });
 
-    test('should handle PR comment API failure gracefully', async () => {
+    test('should fail publishing when the PR lookup fails', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1342,9 +1398,8 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should warn but not fail
-      expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+      expect(mockCore.setFailed).toHaveBeenCalledWith('API Error');
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
   });
 

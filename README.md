@@ -37,6 +37,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `create_release_as_draft`   | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing           | No       | `false`                 |
 | `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release                                                                                                                                                                                                                                                 | No       | `false`                 |
 | `comment_on_linked_issues`  | Comment on closed issues linked to PRs in the release notes to notify followers of the release (uses GraphQL `closingIssuesReferences`; idempotent — updates existing comment on rerun). Comments are posted for both published and draft releases; the comment is updated if the version changes on a subsequent run. | No       | `false`                 |
+| `skip_release_label`        | Skip publishing when the most recently merged PR for the commit has this label. The label must exist in the repository.                                                                                                                                                                                                | No       | `skip-release`          |
 
 ### Commit Signing Behavior
 
@@ -57,6 +58,7 @@ The action requires specific permissions depending on features used:
 | Permission             | Required | Purpose                                                                |
 | ---------------------- | -------- | ---------------------------------------------------------------------- |
 | `contents: write`      | Yes      | Push tags and create releases                                          |
+| `pull-requests: read`  | Yes      | Check the merged PR label before publishing                            |
 | `pull-requests: write` | No       | Post reminder comment on merged PR (`draft_release_pr_reminder: true`) |
 | `issues: write`        | No       | Comment on linked issues (`comment_on_linked_issues: true`)            |
 
@@ -65,7 +67,7 @@ Example with all permissions:
 ```yml
 permissions:
   contents: write
-  pull-requests: write # only needed if using draft_release_pr_reminder
+  pull-requests: write # required for the label check; write also allows draft_release_pr_reminder
   issues: write # only needed if using comment_on_linked_issues
 ```
 
@@ -98,4 +100,7 @@ jobs:
           publish_release_branch: false
           create_release_as_draft: false
           draft_release_pr_reminder: true
+          skip_release_label: skip-release
 ```
+
+Add the `skip-release` label to each repository where you want to use this opt-out. Merging a PR with that label skips publishing for that commit; tests and other CI workflows still run. The next unlabelled merge can publish the accumulated changes with a single version bump.
