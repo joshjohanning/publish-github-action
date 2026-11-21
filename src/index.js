@@ -513,7 +513,9 @@ export async function updateDraftReminderComment(octokit, context, release) {
     try {
       ({
         data: { login: authenticatedLogin }
-      } = await octokit.rest.users.getAuthenticated());
+      } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
+        description: 'Get authenticated user for PR reminder'
+      }));
     } catch (error) {
       // Installation tokens (e.g. GITHUB_TOKEN) cannot call this endpoint
       core.debug(`Could not determine authenticated user: ${error.message}`);
@@ -521,32 +523,45 @@ export async function updateDraftReminderComment(octokit, context, release) {
     const isOwnComment = comment =>
       authenticatedLogin ? comment.user?.login === authenticatedLogin : comment.user?.type === 'Bot';
 
-    const releaseCommit = await getTagCommit(octokit, context, version);
-    const { data: commit } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: releaseCommit });
+    const releaseCommit = await retryWithBackoff(() => getTagCommit(octokit, context, version), {
+      description: `Resolve release tag ${version}`
+    });
+    const { data: commit } = await retryWithBackoff(
+      () => octokit.rest.git.getCommit({ owner, repo, commit_sha: releaseCommit }),
+      { description: `Get release commit for ${version}` }
+    );
     const sourceCommit = commit.parents?.[0]?.sha;
     if (!sourceCommit) {
       core.info(`Release commit for ${version} has no parent; skipping PR reminder update`);
       return;
     }
 
-    const prs = await octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
-      owner,
-      repo,
-      commit_sha: sourceCommit,
-      per_page: 100
-    });
+    const prs = await retryWithBackoff(
+      () =>
+        octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+          owner,
+          repo,
+          commit_sha: sourceCommit,
+          per_page: 100
+        }),
+      { description: `Find merged PR for ${version}` }
+    );
     const mergedPr = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))[0];
     if (!mergedPr) {
       core.info(`No merged PR found for ${version}; skipping PR reminder update`);
       return;
     }
 
-    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
-      owner,
-      repo,
-      issue_number: mergedPr.number,
-      per_page: 100
-    });
+    const comments = await retryWithBackoff(
+      () =>
+        octokit.paginate(octokit.rest.issues.listComments, {
+          owner,
+          repo,
+          issue_number: mergedPr.number,
+          per_page: 100
+        }),
+      { description: `List PR #${mergedPr.number} reminder comments` }
+    );
     const reminder = comments.find(
       comment =>
         comment.body &&
@@ -566,7 +581,9 @@ export async function updateDraftReminderComment(octokit, context, release) {
       return;
     }
 
-    await octokit.rest.issues.updateComment({ owner, repo, comment_id: reminder.id, body });
+    await retryWithBackoff(() => octokit.rest.issues.updateComment({ owner, repo, comment_id: reminder.id, body }), {
+      description: `Update PR #${mergedPr.number} reminder comment`
+    });
     core.info(`Updated draft release reminder on PR #${mergedPr.number}`);
   } catch (error) {
     core.warning(`Could not update draft release reminder for ${version}: ${error.message}`);

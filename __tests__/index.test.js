@@ -131,7 +131,8 @@ const {
   isTransientError,
   parsePullRequestNumbers,
   buildDraftReminderBody,
-  buildPublishedReminderBody
+  buildPublishedReminderBody,
+  updateDraftReminderComment
 } = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
@@ -2778,8 +2779,62 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.warning).toHaveBeenCalledWith(
         'Could not update draft release reminder for v2.1.2: Resource not accessible by integration'
       );
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(1);
       expect(mockCore.setFailed).not.toHaveBeenCalled();
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('retries transient errors in reminder lookups and comment update', async () => {
+      jest.useFakeTimers();
+      try {
+        const transient = Object.assign(new Error('Service unavailable'), { status: 503 });
+        mockOctokit.rest.users.getAuthenticated
+          .mockRejectedValueOnce(transient)
+          .mockResolvedValue({ data: { login: 'github-actions[bot]' } });
+        mockOctokit.rest.git.getRef.mockRejectedValueOnce(transient);
+        mockOctokit.rest.git.getCommit.mockRejectedValueOnce(transient);
+        mockOctokit.paginate
+          .mockRejectedValueOnce(transient)
+          .mockImplementationOnce(async (method, options) => (await method(options)).data)
+          .mockRejectedValueOnce(transient);
+        mockOctokit.rest.issues.updateComment.mockRejectedValueOnce(transient);
+
+        const result = updateDraftReminderComment(mockOctokit, mockGithub.context, release);
+        await jest.runAllTimersAsync();
+        await result;
+
+        expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.git.getRef).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.paginate).toHaveBeenCalledTimes(4);
+        expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.issues.updateComment).toHaveBeenLastCalledWith(
+          expect.objectContaining({ comment_id: 1, body: buildPublishedReminderBody('v2.1.2', release.html_url) })
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('warns and stops after transient lookup errors exhaust retries', async () => {
+      jest.useFakeTimers();
+      try {
+        mockOctokit.rest.git.getCommit.mockRejectedValue(
+          Object.assign(new Error('Service unavailable'), { status: 503 })
+        );
+
+        const result = updateDraftReminderComment(mockOctokit, mockGithub.context, release);
+        await jest.runAllTimersAsync();
+        await result;
+
+        expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledTimes(4);
+        expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+        expect(mockCore.warning).toHaveBeenCalledWith(
+          'Could not update draft release reminder for v2.1.2: Service unavailable'
+        );
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });
