@@ -54,6 +54,10 @@ inputs:
     description: 'Comment on closed issues linked to PRs in the release notes to notify followers of the release. Comments are posted for both published and draft releases; updated idempotently on rerun.'
     default: 'false'
     required: false
+  skip_release_label:
+    description: 'Skip publishing when the most recently merged PR for the commit has this label (case-insensitive)'
+    default: 'skip-release'
+    required: false
 runs:
   using: 'node24'
   main: 'dist/index.js'

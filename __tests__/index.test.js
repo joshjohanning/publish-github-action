@@ -136,7 +136,8 @@ describe('Publish GitHub Action', () => {
         publish_minor_version: 'false',
         publish_release_branch: 'false',
         create_release_as_draft: 'false',
-        draft_release_pr_reminder: 'true'
+        draft_release_pr_reminder: 'true',
+        skip_release_label: 'skip-release'
       };
       return inputs[name] || '';
     });
@@ -162,7 +163,12 @@ describe('Publish GitHub Action', () => {
 
     // Mock GitHub API calls
     mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({ data: [] });
-    mockOctokit.paginate.mockResolvedValue([]);
+    mockOctokit.paginate.mockImplementation(async (method, options) => {
+      if (method === mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit) {
+        return (await method(options)).data;
+      }
+      return [];
+    });
     mockOctokit.paginate.iterator.mockImplementation(() => asyncPages([]));
     mockOctokit.rest.repos.createRelease.mockImplementation(async params => ({
       data: {
@@ -240,6 +246,134 @@ describe('Publish GitHub Action', () => {
 
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v1.2.3']);
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should skip publishing when the merged PR has the skip release label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping release because PR #42 has the "skip-release" label');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['skip-release', 'Skip-Release'],
+      ['NO-PUBLISH', 'no-publish']
+    ])('should match configured label "%s" to "%s" case-insensitively', async (configuredLabel, labelName) => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? configuredLabel : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: labelName }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a different label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: 'skip-release-later' }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should check the most recently merged PR on a later page', async () => {
+      const firstPage = Array.from({ length: 100 }, (_, index) => ({
+        number: index + 1,
+        merged_at: '2024-01-10T10:00:00Z',
+        labels: []
+      }));
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit
+        .mockResolvedValueOnce({ data: firstPage })
+        .mockResolvedValueOnce({
+          data: [{ number: 101, merged_at: '2024-01-20T10:00:00Z', labels: [{ name: 'skip-release' }] }]
+        });
+      mockOctokit.paginate.mockImplementation(async (method, options) => {
+        const pageOne = await method({ ...options, page: 1 });
+        const pageTwo = await method({ ...options, page: 2 });
+        return [...pageOne.data, ...pageTwo.data];
+      });
+
+      await run();
+
+      expect(mockOctokit.paginate).toHaveBeenCalledWith(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        commit_sha: 'abc123def456',
+        per_page: 100
+      });
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping release because PR #101 has the "skip-release" label');
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should publish when only an older merged PR has the skip release label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 10, merged_at: '2024-01-10T10:00:00Z', labels: [{ name: 'skip-release' }] },
+          { number: 20, merged_at: '2024-01-20T10:00:00Z', labels: [] }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a PR that has not merged yet', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: null,
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+    });
+
+    test('should honor a custom skip release label', async () => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? 'no-publish' : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'no-publish' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
 
     test('should handle npm package command', async () => {
@@ -1298,7 +1432,8 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith({
         owner: 'test-owner',
         repo: 'test-repo',
-        commit_sha: 'abc123def456'
+        commit_sha: 'abc123def456',
+        per_page: 100
       });
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
@@ -1333,7 +1468,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1359,7 +1494,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1461,7 +1596,7 @@ describe('Publish GitHub Action', () => {
       });
     });
 
-    test('should handle PR comment API failure gracefully', async () => {
+    test('should fail publishing when the PR lookup fails', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1485,9 +1620,8 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should warn but not fail
-      expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+      expect(mockCore.setFailed).toHaveBeenCalledWith('API Error');
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
   });
 

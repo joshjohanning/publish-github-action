@@ -523,6 +523,7 @@ export async function run() {
     const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
     const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
     const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
+    const skipReleaseLabel = core.getInput('skip_release_label', { required: false });
 
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
@@ -553,6 +554,20 @@ export async function run() {
       if (existingRelease && !existingRelease.draft) {
         await promoteReleaseTags(octokit, context, existingRelease, publishMinorVersion);
       }
+      return;
+    }
+
+    const prs = await octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      commit_sha: context.sha,
+      per_page: 100
+    });
+    const mergedPrs = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+    const mergedPr = mergedPrs[0];
+
+    if (mergedPr?.labels?.some(label => label.name?.toLowerCase() === skipReleaseLabel.toLowerCase())) {
+      core.info(`Skipping release because PR #${mergedPr.number} has the "${skipReleaseLabel}" label`);
       return;
     }
 
@@ -753,50 +768,34 @@ export async function run() {
 
     // Post reminder comment on merged PR if draft release was created
     if (createReleaseAsDraft === 'true' && draftReleasePrReminder !== 'false') {
-      try {
-        // Find the PR associated with the current commit (the merge commit)
-        const commitShaForPr = context.sha;
-        const { data: prs } = await octokit.rest.repos.listPullRequestsAssociatedWithCommit({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          commit_sha: commitShaForPr
-        });
+      if (mergedPr) {
+        const releaseUrl = release.data.html_url;
 
-        if (prs.length > 0) {
-          // Get the most recently merged PR by sorting by merged_at date descending
-          const mergedPrs = prs
-            .filter(pr => pr.merged_at)
-            .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+        const commentBody =
+          `## 📦 Draft Release Created\n\n` +
+          `A draft release **${version}** has been created for this PR.\n\n` +
+          `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
+          `### Next Steps\n` +
+          `- [ ] Review the release notes\n` +
+          `- [ ] Publish the release to make it permanent\n\n` +
+          `> _This is an automated reminder from the publish-github-action workflow._`;
 
-          if (mergedPrs.length === 0) {
-            core.info('No merged PR found for this commit, skipping PR comment');
-          } else {
-            const mergedPr = mergedPrs[0];
-            const releaseUrl = release.data.html_url;
+        try {
+          await octokit.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: mergedPr.number,
+            body: commentBody
+          });
 
-            const commentBody =
-              `## 📦 Draft Release Created\n\n` +
-              `A draft release **${version}** has been created for this PR.\n\n` +
-              `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
-              `### Next Steps\n` +
-              `- [ ] Review the release notes\n` +
-              `- [ ] Publish the release to make it permanent\n\n` +
-              `> _This is an automated reminder from the publish-github-action workflow._`;
-
-            await octokit.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: mergedPr.number,
-              body: commentBody
-            });
-
-            core.info(`Posted reminder comment on PR #${mergedPr.number}`);
-          }
-        } else {
-          core.info('No associated PR found for this commit');
+          core.info(`Posted reminder comment on PR #${mergedPr.number}`);
+        } catch (error) {
+          core.warning(`Could not post PR comment: ${error.message}`);
         }
-      } catch (error) {
-        core.warning(`Could not post PR comment: ${error.message}`);
+      } else if (prs.length > 0) {
+        core.info('No merged PR found for this commit, skipping PR comment');
+      } else {
+        core.info('No associated PR found for this commit');
       }
     }
 
