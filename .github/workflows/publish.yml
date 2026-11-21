@@ -62,4 +62,4 @@ jobs:
           mode: promote
           release_tag: ${{ inputs.promote_tag }}
           publish_minor_version: false
-          draft_release_pr_reminder: true
+          update_draft_release_pr_reminder: true

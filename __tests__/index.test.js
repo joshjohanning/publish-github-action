@@ -1496,7 +1496,7 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
-    test('should not post comment when draft_release_pr_reminder is false', async () => {
+    test('should not post a reminder when only the update input is enabled', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1504,7 +1504,8 @@ describe('Publish GitHub Action', () => {
           commit_node_modules: 'false',
           commit_dist_folder: 'true',
           create_release_as_draft: 'true',
-          draft_release_pr_reminder: 'false'
+          draft_release_pr_reminder: 'false',
+          update_draft_release_pr_reminder: 'true'
         };
         return inputs[name] || '';
       });
@@ -2697,7 +2698,9 @@ describe('Publish GitHub Action', () => {
     const setInputs = overrides =>
       mockCore.getInput.mockImplementation(
         name =>
-          ({ github_token: 'test-token', mode: 'promote', draft_release_pr_reminder: 'true', ...overrides })[name] || ''
+          ({ github_token: 'test-token', mode: 'promote', update_draft_release_pr_reminder: 'true', ...overrides })[
+            name
+          ] || ''
       );
 
     test('should check off the reminder on the latest merged PR for the release source commit', async () => {
@@ -2760,15 +2763,18 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
     });
 
-    test('should skip the reminder update when draft_release_pr_reminder is not enabled', async () => {
-      setInputs({ draft_release_pr_reminder: '' });
+    test.each(['', 'false'])(
+      'should skip the reminder update when the update input is %j, even if the posting input is enabled',
+      async updateInput => {
+        setInputs({ draft_release_pr_reminder: 'true', update_draft_release_pr_reminder: updateInput });
 
-      await run();
+        await run();
 
-      expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
-    });
+        expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
+        expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+        expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+      }
+    );
 
     test('should warn without failing promotion when the update fails', async () => {
       setInputs();

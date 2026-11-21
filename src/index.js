@@ -641,7 +641,7 @@ export async function run() {
         throw new Error('mode: promote requires a release published/released event or the release_tag input');
       }
       await promoteReleaseTags(octokit, context, release, publishMinorVersion);
-      if (core.getInput('draft_release_pr_reminder', { required: false }) === 'true') {
+      if (core.getInput('update_draft_release_pr_reminder', { required: false }) === 'true') {
         await updateDraftReminderComment(octokit, context, release);
       }
       core.info('✅ Action completed successfully!');
