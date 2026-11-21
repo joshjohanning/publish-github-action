@@ -47,7 +47,7 @@ inputs:
     default: 'false'
     required: false
   draft_release_pr_reminder:
-    description: 'Post a reminder comment on the merged PR when creating a draft release'
+    description: 'Post a reminder comment on the merged PR when creating a draft release. In mode: promote, update that comment to show the release as published'
     default: 'false'
     required: false
   comment_on_linked_issues:

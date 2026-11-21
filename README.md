@@ -38,7 +38,7 @@ Please refer to the [release page](https://github.com/joshjohanning/publish-gith
 | `publish_minor_version`     | Whether to publish minor version tag (e.g., `v1.2`)                                                                                                                                                                                                                                                                    | No       | `false`                 |
 | `publish_release_branch`    | Whether to publish release branch (e.g., `releases/v1.2.3`)                                                                                                                                                                                                                                                            | No       | `false`                 |
 | `create_release_as_draft`   | Whether to create release as draft to allow review of the release before publishing; useful with [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) where changes cannot be made after publishing           | No       | `false`                 |
-| `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release                                                                                                                                                                                                                                                 | No       | `false`                 |
+| `draft_release_pr_reminder` | Post a reminder comment on the merged PR when creating a draft release. In `mode: promote`, update that comment to mark the release as published (see [Draft releases](#draft-releases-and-floating-tags))                                                                                                             | No       | `false`                 |
 | `comment_on_linked_issues`  | Comment on closed issues linked to PRs in the release notes to notify followers of the release (uses GraphQL `closingIssuesReferences`; idempotent — updates existing comment on rerun). Comments are posted for both published and draft releases; the comment is updated if the version changes on a subsequent run. | No       | `false`                 |
 | `skip_release_label`        | Skip publishing when the most recently merged PR for the commit has this label (case-insensitive). The label must exist in the repository.                                                                                                                                                                             | No       | `skip-release`          |
 
@@ -51,6 +51,8 @@ To promote the floating tags once you publish the draft, run this action again w
 For non-draft releases (`create_release_as_draft: false`), the floating tags are promoted immediately after the release is created. If that promotion fails, rerunning the publish workflow resumes it for the existing published release without rebuilding or moving the exact tag.
 
 To promote manually (for example, drafts created before the release commit contained the listener, or a promotion run that was missed), run `mode: promote` with `release_tag` set to the published release tag. The example workflow below exposes this as a `promote_tag` input on `workflow_dispatch`. The same newest-stable-release checks apply.
+
+Set `draft_release_pr_reminder: true` on the promote step as well to update the draft release reminder comment on the merged PR once the release is published: the next steps are checked off and the link points to the published release. Updating the comment is best effort (failures are logged as warnings) and requires `pull-requests: write` on the promote job.
 
 Serialize all publication and promotion entry points in the repository with the **same concurrency group** and `cancel-in-progress: false`. This keeps the newest-release eligibility check and alias updates inside one serialized execution, preventing an older run from overwriting a newer promotion. The examples use `${{ github.workflow }}-publish`; if publication and promotion live in differently named workflows, use the same fixed group (for example, `Publish GitHub Action-publish`) in each instead. Do not include the branch, tag, or event in the group.
 
@@ -75,12 +77,12 @@ The action automatically handles clean builds and file management:
 
 The action requires specific permissions depending on features used:
 
-| Permission             | Required | Purpose                                                                |
-| ---------------------- | -------- | ---------------------------------------------------------------------- |
-| `contents: write`      | Yes      | Push tags, create releases, and promote floating tags                  |
-| `pull-requests: read`  | Publish  | Check the merged PR label before publishing                            |
-| `pull-requests: write` | No       | Post reminder comment on merged PR (`draft_release_pr_reminder: true`) |
-| `issues: write`        | No       | Comment on linked issues (`comment_on_linked_issues: true`)            |
+| Permission             | Required | Purpose                                                                                   |
+| ---------------------- | -------- | ----------------------------------------------------------------------------------------- |
+| `contents: write`      | Yes      | Push tags, create releases, and promote floating tags                                     |
+| `pull-requests: read`  | Publish  | Check the merged PR label before publishing                                               |
+| `pull-requests: write` | No       | Post and update the reminder comment on the merged PR (`draft_release_pr_reminder: true`) |
+| `issues: write`        | No       | Comment on linked issues (`comment_on_linked_issues: true`)                               |
 
 Example with all permissions:
 
@@ -180,4 +182,5 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           mode: promote
           release_tag: ${{ inputs.promote_tag }}
+          draft_release_pr_reminder: true # mark the reminder comment as published
 ```

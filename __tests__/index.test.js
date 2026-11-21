@@ -20,10 +20,16 @@ const mockExec = {
 };
 
 // Mock the @actions/github module
+const mockGithubContext = {
+  eventName: 'push',
+  repo: { owner: 'test-owner', repo: 'test-repo' },
+  sha: 'abc123def456',
+  payload: {}
+};
+
 const mockGithub = {
-  context: {
-    repo: { owner: 'test-owner', repo: 'test-repo' },
-    sha: 'abc123def456'
+  get context() {
+    return mockGithubContext;
   },
   getOctokit: jest.fn()
 };
@@ -58,6 +64,9 @@ const mockOctokit = {
     },
     users: {
       getAuthenticated: jest.fn()
+    },
+    pulls: {
+      list: jest.fn()
     }
   },
   paginate: jest.fn(),
@@ -116,11 +125,25 @@ jest.unstable_mockModule('semver', () => ({
 }));
 
 // Import the main module after mocking
-const { default: run, retryWithBackoff, isTransientError, parsePullRequestNumbers } = await import('../src/index.js');
+const {
+  default: run,
+  retryWithBackoff,
+  isTransientError,
+  parsePullRequestNumbers,
+  buildDraftReminderBody,
+  buildPublishedReminderBody,
+  updateDraftReminderComment
+} = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+
+    // Reset context to default push event
+    mockGithubContext.eventName = 'push';
+    mockGithubContext.repo = { owner: 'test-owner', repo: 'test-repo' };
+    mockGithubContext.sha = 'abc123def456';
+    mockGithubContext.payload = {};
 
     // Set up default mocks
     mockGithub.getOctokit.mockReturnValue(mockOctokit);
@@ -186,6 +209,7 @@ describe('Publish GitHub Action', () => {
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.users.getAuthenticated.mockResolvedValue({ data: { login: 'test-bot' } });
+    mockOctokit.rest.pulls.list.mockResolvedValue({ data: [] });
     mockOctokit.graphql.mockResolvedValue({
       repository: {
         pullRequest: {
@@ -2626,6 +2650,191 @@ describe('Publish GitHub Action', () => {
       // initial + 3 retries = 4 calls
       expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(4);
       expect(mockCore.setFailed).toHaveBeenCalledWith('Object does not exist');
+    });
+  });
+
+  describe('Draft release reminder update on promote', () => {
+    const release = {
+      id: 55,
+      tag_name: 'v2.1.2',
+      draft: false,
+      prerelease: false,
+      html_url: 'https://github.com/test-owner/test-repo/releases/tag/v2.1.2'
+    };
+    const draftBody = buildDraftReminderBody('v2.1.2', 'https://github.com/test-owner/test-repo/releases/untagged-1');
+    const legacyBody =
+      '## 📦 Draft Release Created\n\nA draft release **v2.1.2** has been created for this PR.\n\n- [ ] Publish';
+
+    beforeEach(() => {
+      mockGithub.context.eventName = 'release';
+      mockGithub.context.payload = { action: 'published', release };
+      mockSemver.major.mockImplementation(realSemver.default.major);
+      mockSemver.minor.mockImplementation(realSemver.default.minor);
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({ data: release });
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => ({
+        data: { object: { sha: ref === 'tags/v2.1.2' ? 'annotated-tag-sha' : 'alias-tag-sha', type: 'tag' } }
+      }));
+      mockOctokit.rest.git.getTag.mockResolvedValue({ data: { object: { sha: 'release-commit', type: 'commit' } } });
+      mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { parents: [{ sha: 'source-commit' }] } });
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 7, merged_at: '2026-01-01T00:00:00Z' },
+          { number: 8, merged_at: '2026-02-01T00:00:00Z' },
+          { number: 9, merged_at: null }
+        ]
+      });
+      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Resource not accessible by integration'));
+      setComments([{ id: 1, user: { login: 'github-actions[bot]', type: 'Bot' }, body: draftBody }]);
+    });
+
+    const setComments = comments => {
+      mockOctokit.paginate.mockImplementation(async (method, options) => {
+        if (method === mockOctokit.rest.issues.listComments) return comments;
+        return (await method(options)).data;
+      });
+    };
+
+    const setInputs = overrides =>
+      mockCore.getInput.mockImplementation(
+        name =>
+          ({ github_token: 'test-token', mode: 'promote', draft_release_pr_reminder: 'true', ...overrides })[name] || ''
+      );
+
+    test('should check off the reminder on the latest merged PR for the release source commit', async () => {
+      setInputs();
+
+      await run();
+
+      expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'release-commit' })
+      );
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'source-commit' })
+      );
+      expect(mockOctokit.paginate).toHaveBeenCalledWith(
+        mockOctokit.rest.issues.listComments,
+        expect.objectContaining({ issue_number: 8 })
+      );
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({ comment_id: 1, body: buildPublishedReminderBody('v2.1.2', release.html_url) })
+      );
+      const { body } = mockOctokit.rest.issues.updateComment.mock.calls[0][0];
+      expect(body).toContain('- [x] Review the release notes');
+      expect(body).toContain('- [x] Publish the release to make it permanent');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should update legacy reminders without a marker', async () => {
+      setInputs();
+      setComments([{ id: 2, user: { login: 'github-actions[bot]', type: 'Bot' }, body: legacyBody }]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 2 }));
+    });
+
+    test('should not update comments by other authors or for other versions', async () => {
+      setInputs();
+      setComments([
+        { id: 3, user: { login: 'someone', type: 'User' }, body: draftBody },
+        { id: 4, user: { login: 'github-actions[bot]', type: 'Bot' }, body: legacyBody.replace('v2.1.2', 'v2.1.1') }
+      ]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    });
+
+    test('should not rewrite a reminder that is already published', async () => {
+      setInputs();
+      setComments([
+        {
+          id: 5,
+          user: { login: 'github-actions[bot]', type: 'Bot' },
+          body: buildPublishedReminderBody('v2.1.2', release.html_url)
+        }
+      ]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    });
+
+    test('should skip the reminder update when draft_release_pr_reminder is not enabled', async () => {
+      setInputs({ draft_release_pr_reminder: '' });
+
+      await run();
+
+      expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should warn without failing promotion when the update fails', async () => {
+      setInputs();
+      mockOctokit.rest.issues.updateComment.mockRejectedValue(new Error('Resource not accessible by integration'));
+
+      await run();
+
+      expect(mockCore.warning).toHaveBeenCalledWith(
+        'Could not update draft release reminder for v2.1.2: Resource not accessible by integration'
+      );
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(1);
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('retries transient errors in reminder lookups and comment update', async () => {
+      jest.useFakeTimers();
+      try {
+        const transient = Object.assign(new Error('Service unavailable'), { status: 503 });
+        mockOctokit.rest.users.getAuthenticated
+          .mockRejectedValueOnce(transient)
+          .mockResolvedValue({ data: { login: 'github-actions[bot]' } });
+        mockOctokit.rest.git.getRef.mockRejectedValueOnce(transient);
+        mockOctokit.rest.git.getCommit.mockRejectedValueOnce(transient);
+        mockOctokit.paginate
+          .mockRejectedValueOnce(transient)
+          .mockImplementationOnce(async (method, options) => (await method(options)).data)
+          .mockRejectedValueOnce(transient);
+        mockOctokit.rest.issues.updateComment.mockRejectedValueOnce(transient);
+
+        const result = updateDraftReminderComment(mockOctokit, mockGithub.context, release);
+        await jest.runAllTimersAsync();
+        await result;
+
+        expect(mockOctokit.rest.users.getAuthenticated).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.git.getRef).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.paginate).toHaveBeenCalledTimes(4);
+        expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(2);
+        expect(mockOctokit.rest.issues.updateComment).toHaveBeenLastCalledWith(
+          expect.objectContaining({ comment_id: 1, body: buildPublishedReminderBody('v2.1.2', release.html_url) })
+        );
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('warns and stops after transient lookup errors exhaust retries', async () => {
+      jest.useFakeTimers();
+      try {
+        mockOctokit.rest.git.getCommit.mockRejectedValue(
+          Object.assign(new Error('Service unavailable'), { status: 503 })
+        );
+
+        const result = updateDraftReminderComment(mockOctokit, mockGithub.context, release);
+        await jest.runAllTimersAsync();
+        await result;
+
+        expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledTimes(4);
+        expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+        expect(mockCore.warning).toHaveBeenCalledWith(
+          'Could not update draft release reminder for v2.1.2: Service unavailable'
+        );
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });
