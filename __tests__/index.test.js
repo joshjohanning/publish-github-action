@@ -267,6 +267,35 @@ describe('Publish GitHub Action', () => {
       expect(mockCore.setFailed).not.toHaveBeenCalled();
     });
 
+    test.each([
+      ['skip-release', 'Skip-Release'],
+      ['NO-PUBLISH', 'no-publish']
+    ])('should match configured label "%s" to "%s" case-insensitively', async (configuredLabel, labelName) => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? configuredLabel : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: labelName }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a different label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: 'skip-release-later' }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
     test('should check the most recently merged PR on a later page', async () => {
       const firstPage = Array.from({ length: 100 }, (_, index) => ({
         number: index + 1,

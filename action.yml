@@ -55,7 +55,7 @@ inputs:
     default: 'false'
     required: false
   skip_release_label:
-    description: 'Skip publishing when the most recently merged PR for the commit has this label'
+    description: 'Skip publishing when the most recently merged PR for the commit has this label (case-insensitive)'
     default: 'skip-release'
     required: false
 runs:

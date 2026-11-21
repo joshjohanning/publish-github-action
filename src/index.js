@@ -566,7 +566,7 @@ export async function run() {
     const mergedPrs = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
     const mergedPr = mergedPrs[0];
 
-    if (mergedPr?.labels?.some(label => label.name === skipReleaseLabel)) {
+    if (mergedPr?.labels?.some(label => label.name?.toLowerCase() === skipReleaseLabel.toLowerCase())) {
       core.info(`Skipping release because PR #${mergedPr.number} has the "${skipReleaseLabel}" label`);
       return;
     }
