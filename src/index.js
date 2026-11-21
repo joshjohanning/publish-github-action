@@ -300,6 +300,9 @@ export function parsePullRequestNumbers(text) {
 
 const RELEASE_COMMENT_MARKER = '<!-- publish-github-action-release -->';
 
+/** Version-specific marker prefix for draft release PR reminder comments */
+const DRAFT_COMMENT_MARKER_PREFIX = '<!-- publish-github-action-draft:';
+
 /**
  * Build the release comment body with an HTML marker for idempotency.
  * @param {string} version - Version tag (e.g. v1.2.3)
@@ -455,6 +458,139 @@ async function promoteReleaseTags(octokit, context, release, publishMinorVersion
 }
 
 /**
+ * Build the draft release PR reminder comment body.
+ * @param {string} version - Version tag (e.g. v1.2.3)
+ * @param {string} releaseUrl - URL to the draft release
+ * @returns {string} Comment body
+ */
+export function buildDraftReminderBody(version, releaseUrl) {
+  return (
+    `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->\n` +
+    `## 📦 Draft Release Created\n\n` +
+    `A draft release **${version}** has been created for this PR.\n\n` +
+    `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
+    `### Next Steps\n` +
+    `- [ ] Review the release notes\n` +
+    `- [ ] Publish the release to make it permanent\n\n` +
+    `> _This is an automated reminder from the publish-github-action workflow._`
+  );
+}
+
+/**
+ * Build the published release PR comment body that replaces the draft reminder.
+ * @param {string} version - Version tag (e.g. v1.2.3)
+ * @param {string} releaseUrl - URL to the published release
+ * @returns {string} Comment body
+ */
+export function buildPublishedReminderBody(version, releaseUrl) {
+  return (
+    `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->\n` +
+    `## ✅ Release Published\n\n` +
+    `Release **${version}** has been published.\n\n` +
+    `🔗 **[View Release](${releaseUrl})**\n\n` +
+    `### Next Steps\n` +
+    `- [x] Review the release notes\n` +
+    `- [x] Publish the release to make it permanent\n\n` +
+    `> _This comment was updated by the publish-github-action workflow._`
+  );
+}
+
+/**
+ * Update the draft release reminder comment on the merged PR once the release is published.
+ * The release tag points at the generated release commit, whose first parent is the source
+ * commit that the PR was merged as. Failures are reported as warnings.
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {object} release - Published release returned by GitHub
+ */
+export async function updateDraftReminderComment(octokit, context, release) {
+  const version = release.tag_name;
+  const marker = `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->`;
+  const { owner, repo } = context.repo;
+
+  try {
+    let authenticatedLogin;
+    try {
+      ({
+        data: { login: authenticatedLogin }
+      } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
+        description: 'Get authenticated user for PR reminder'
+      }));
+    } catch (error) {
+      // Installation tokens (e.g. GITHUB_TOKEN) cannot call this endpoint
+      core.debug(`Could not determine authenticated user: ${error.message}`);
+    }
+    const isOwnComment = comment =>
+      authenticatedLogin ? comment.user?.login === authenticatedLogin : comment.user?.type === 'Bot';
+
+    const releaseCommit = await retryWithBackoff(() => getTagCommit(octokit, context, version), {
+      description: `Resolve release tag ${version}`
+    });
+    const { data: commit } = await retryWithBackoff(
+      () => octokit.rest.git.getCommit({ owner, repo, commit_sha: releaseCommit }),
+      { description: `Get release commit for ${version}` }
+    );
+    const sourceCommit = commit.parents?.[0]?.sha;
+    if (!sourceCommit) {
+      core.info(`Release commit for ${version} has no parent; skipping PR reminder update`);
+      return;
+    }
+
+    const prs = await retryWithBackoff(
+      () =>
+        octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+          owner,
+          repo,
+          commit_sha: sourceCommit,
+          per_page: 100
+        }),
+      { description: `Find merged PR for ${version}` }
+    );
+    const mergedPr = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))[0];
+    if (!mergedPr) {
+      core.info(`No merged PR found for ${version}; skipping PR reminder update`);
+      return;
+    }
+
+    const comments = await retryWithBackoff(
+      () =>
+        octokit.paginate(octokit.rest.issues.listComments, {
+          owner,
+          repo,
+          issue_number: mergedPr.number,
+          per_page: 100
+        }),
+      { description: `List PR #${mergedPr.number} reminder comments` }
+    );
+    const reminder = comments.find(
+      comment =>
+        comment.body &&
+        isOwnComment(comment) &&
+        (comment.body.includes(marker) ||
+          // Reminders posted before the marker existed
+          (comment.body.includes('## 📦 Draft Release Created') && comment.body.includes(`**${version}**`)))
+    );
+    if (!reminder) {
+      core.info(`No draft release reminder for ${version} found on PR #${mergedPr.number}`);
+      return;
+    }
+
+    const body = buildPublishedReminderBody(version, release.html_url);
+    if (reminder.body === body) {
+      core.info(`PR #${mergedPr.number} reminder already shows ${version} as published`);
+      return;
+    }
+
+    await retryWithBackoff(() => octokit.rest.issues.updateComment({ owner, repo, comment_id: reminder.id, body }), {
+      description: `Update PR #${mergedPr.number} reminder comment`
+    });
+    core.info(`Updated draft release reminder on PR #${mergedPr.number}`);
+  } catch (error) {
+    core.warning(`Could not update draft release reminder for ${version}: ${error.message}`);
+  }
+}
+
+/**
  * Main action logic
  */
 export async function run() {
@@ -505,6 +641,9 @@ export async function run() {
         throw new Error('mode: promote requires a release published/released event or the release_tag input');
       }
       await promoteReleaseTags(octokit, context, release, publishMinorVersion);
+      if (core.getInput('draft_release_pr_reminder', { required: false }) === 'true') {
+        await updateDraftReminderComment(octokit, context, release);
+      }
       core.info('✅ Action completed successfully!');
       return;
     }
@@ -771,14 +910,7 @@ export async function run() {
       if (mergedPr) {
         const releaseUrl = release.data.html_url;
 
-        const commentBody =
-          `## 📦 Draft Release Created\n\n` +
-          `A draft release **${version}** has been created for this PR.\n\n` +
-          `🔗 **[View Draft Release](${releaseUrl})**\n\n` +
-          `### Next Steps\n` +
-          `- [ ] Review the release notes\n` +
-          `- [ ] Publish the release to make it permanent\n\n` +
-          `> _This is an automated reminder from the publish-github-action workflow._`;
+        const commentBody = buildDraftReminderBody(version, releaseUrl);
 
         try {
           await octokit.rest.issues.createComment({
