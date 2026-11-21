@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       promote_tag:
-        description: 'Only promote floating tags to this published release tag (e.g. v3.2.0); leave empty to publish'
+        description: 'Only promote floating tags to this published release tag (e.g. v2.1.2); leave empty to publish'
         required: false
         default: ''
   push:
@@ -12,15 +12,15 @@ on:
   release:
     types: [published, released]
 
-permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-
 concurrency:
   group: ${{ github.workflow }}-publish
   cancel-in-progress: false
   queue: max
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
   publish:
@@ -29,15 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - run: npm ci --ignore-scripts --allow-git=none
-      - run: npm run package
-      - uses: ./
+      - uses: joshjohanning/publish-github-action@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           npm_package_command: npm run package
@@ -49,15 +42,20 @@ jobs:
           draft_release_pr_reminder: true
           comment_on_linked_issues: true
 
+  # Draft releases only push the exact version tag (e.g. v2.1.2);
+  # move the floating major tag (e.g. v2) once the release is published.
+  # Run manually with promote_tag to recover a release that was not promoted.
   promote:
     if: (github.event_name == 'release' && !github.event.release.draft && !github.event.release.prerelease) || (github.event_name == 'workflow_dispatch' && inputs.promote_tag != '')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.release.tag_name || inputs.promote_tag }}
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-      - uses: ./
+      - uses: joshjohanning/publish-github-action@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           mode: promote
