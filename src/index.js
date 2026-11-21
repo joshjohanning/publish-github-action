@@ -112,9 +112,10 @@ export async function retryWithBackoff(
  * @param {string} branchName - Name of the branch to commit to
  * @param {string} version - Version being released
  * @param {string} commitDistFolder - Whether to commit dist folder
+ * @param {string} releaseWorkflowFile - Optional workflow file to keep in the release tree
  * @returns {string} The SHA of the new commit
  */
-async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder) {
+async function createCommitViaAPI(octokit, context, branchName, version, commitDistFolder, releaseWorkflowFile) {
   try {
     core.info('Creating verified commit via GitHub API...');
 
@@ -148,12 +149,20 @@ async function createCommitViaAPI(octokit, context, branchName, version, commitD
       });
       existingTree = tree.tree;
     } catch (error) {
+      if (releaseWorkflowFile) {
+        throw new Error(`Could not verify release workflow ${releaseWorkflowFile}: ${error.message}`);
+      }
       core.info(`Could not fetch existing tree: ${error.message}`);
       existingTree = [];
     }
 
-    // Always remove .github folder from release commits
-    const githubFiles = existingTree.filter(item => item.path.startsWith('.github/'));
+    // Remove .github files from release commits, except the selected published-release workflow.
+    if (releaseWorkflowFile && !existingTree.some(item => item.path === releaseWorkflowFile && item.type === 'blob')) {
+      throw new Error(`release_workflow_file ${releaseWorkflowFile} does not exist in the source tree`);
+    }
+    const githubFiles = existingTree.filter(
+      item => item.type === 'blob' && item.path.startsWith('.github/') && item.path !== releaseWorkflowFile
+    );
     for (const file of githubFiles) {
       treeItems.push({
         path: file.path,
@@ -305,12 +314,156 @@ function buildReleaseCommentBody(version, releaseUrl) {
 }
 
 /**
+ * Resolve an annotated or lightweight tag to its commit SHA.
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {string} tagName - Tag name to resolve
+ * @returns {Promise<string>} Commit SHA
+ */
+async function getTagCommit(octokit, context, tagName) {
+  const { data: ref } = await octokit.rest.git.getRef({
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    ref: `tags/${tagName}`
+  });
+
+  let object = ref.object;
+  for (let depth = 0; object?.type === 'tag' && depth < 10; depth++) {
+    const { data: tag } = await octokit.rest.git.getTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag_sha: object.sha
+    });
+    object = tag.object;
+  }
+
+  if (object?.type !== 'commit' || !object.sha) {
+    throw new Error(`Tag ${tagName} does not resolve to a commit`);
+  }
+
+  return object.sha;
+}
+
+/**
+ * Confirm a release is published and promote its eligible floating version tags.
+ * @param {object} octokit - GitHub API client
+ * @param {object} context - GitHub Actions context
+ * @param {object} release - Release returned by GitHub
+ * @param {boolean} publishMinorVersion - Whether to promote the minor alias
+ */
+async function promoteReleaseTags(octokit, context, release, publishMinorVersion) {
+  if (release.draft) {
+    throw new Error(`Release ${release.tag_name} must be published before promoting tags`);
+  }
+
+  const version = release.tag_name;
+  if (!semver.valid(version)) {
+    throw new Error(`Release tag ${version} is not a valid semantic version`);
+  }
+
+  if (release.prerelease || semver.prerelease(version)) {
+    core.info(`Release ${version} is a prerelease; not promoting floating version tags`);
+    return;
+  }
+
+  const currentCommit = await getTagCommit(octokit, context, version);
+  const releases = [];
+  for await (const { data: page } of octokit.paginate.iterator(octokit.rest.repos.listReleases, {
+    owner: context.repo.owner,
+    repo: context.repo.repo,
+    per_page: 100
+  })) {
+    releases.push(...page);
+  }
+
+  // Include the confirmed release in case the release list has not caught up yet.
+  if (!releases.some(item => item.id === release.id)) {
+    releases.push(release);
+  }
+
+  const stableVersions = releases
+    .filter(item => item && !item.draft && !item.prerelease && semver.valid(item.tag_name))
+    .filter(item => !semver.prerelease(item.tag_name))
+    .map(item => item.tag_name);
+  const major = semver.major(version);
+  const minor = semver.minor(version);
+  const isLatestForMajor = stableVersions.every(
+    candidate => semver.major(candidate) !== major || !semver.gt(candidate, version)
+  );
+  const isLatestForMinor = stableVersions.every(
+    candidate =>
+      semver.major(candidate) !== major || semver.minor(candidate) !== minor || !semver.gt(candidate, version)
+  );
+
+  const aliases = [];
+  if (isLatestForMajor) {
+    aliases.push(`v${major}`);
+  } else {
+    core.info(`Skipping major alias v${major}; a newer stable release is already published`);
+  }
+  if (publishMinorVersion) {
+    if (isLatestForMinor) {
+      aliases.push(`v${major}.${minor}`);
+    } else {
+      core.info(`Skipping minor alias v${major}.${minor}; a newer stable release is already published`);
+    }
+  }
+
+  for (const alias of aliases) {
+    const ref = `tags/${alias}`;
+    let refExists = true;
+    try {
+      if ((await getTagCommit(octokit, context, alias)) === currentCommit) {
+        core.info(`Floating tag ${alias} already points to ${version}`);
+        continue;
+      }
+    } catch (error) {
+      if (error.status !== 404) {
+        throw error;
+      }
+      refExists = false;
+    }
+
+    const tag = await octokit.rest.git.createTag({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      tag: alias,
+      message: alias,
+      object: currentCommit,
+      type: 'commit',
+      tagger: {
+        name: 'github-actions[bot]',
+        email: 'github-actions[bot]@users.noreply.github.com',
+        date: new Date().toISOString()
+      }
+    });
+    if (refExists) {
+      await octokit.rest.git.updateRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref,
+        sha: tag.data.sha,
+        force: true
+      });
+    } else {
+      await octokit.rest.git.createRef({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        ref: `refs/${ref}`,
+        sha: tag.data.sha
+      });
+    }
+    core.info(`Promoted annotated tag ${alias} to ${version}`);
+  }
+}
+
+/**
  * Build the draft release PR reminder comment body.
  * @param {string} version - Version tag (e.g. v1.2.3)
  * @param {string} releaseUrl - URL to the draft release
  * @returns {string} Comment body
  */
-function buildDraftReminderBody(version, releaseUrl) {
+export function buildDraftReminderBody(version, releaseUrl) {
   return (
     `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->\n` +
     `## 📦 Draft Release Created\n\n` +
@@ -324,17 +477,17 @@ function buildDraftReminderBody(version, releaseUrl) {
 }
 
 /**
- * Build the published release PR comment body (replaces draft reminder).
+ * Build the published release PR comment body that replaces the draft reminder.
  * @param {string} version - Version tag (e.g. v1.2.3)
  * @param {string} releaseUrl - URL to the published release
  * @returns {string} Comment body
  */
-function buildPublishedReminderBody(version, releaseUrl) {
+export function buildPublishedReminderBody(version, releaseUrl) {
   return (
     `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->\n` +
     `## ✅ Release Published\n\n` +
-    `Release **${version}** has been published!\n\n` +
-    `🔗 **[View Published Release](${releaseUrl})**\n\n` +
+    `Release **${version}** has been published.\n\n` +
+    `🔗 **[View Release](${releaseUrl})**\n\n` +
     `### Next Steps\n` +
     `- [x] Review the release notes\n` +
     `- [x] Publish the release to make it permanent\n\n` +
@@ -343,133 +496,80 @@ function buildPublishedReminderBody(version, releaseUrl) {
 }
 
 /**
- * Handle release.published event by updating the draft PR reminder comment.
+ * Update the draft release reminder comment on the merged PR once the release is published.
+ * The release tag points at the generated release commit, whose first parent is the source
+ * commit that the PR was merged as. Failures are reported as warnings.
  * @param {object} octokit - GitHub API client
  * @param {object} context - GitHub Actions context
+ * @param {object} release - Published release returned by GitHub
  */
-async function handleReleasePublished(octokit, context) {
-  const release = context.payload?.release;
-
-  if (!release || !release.tag_name || !release.html_url) {
-    core.warning('Release event missing expected payload data; cannot update PR comments.');
-    return;
-  }
-
+export async function updateDraftReminderComment(octokit, context, release) {
   const version = release.tag_name;
-  // Construct predictable tag-based URL (draft html_url contains untagged-... that 404s)
-  const repoUrl = release.html_url.replace(/\/releases\/tag\/.*$/, '');
-  const releaseUrl = `${repoUrl}/releases/tag/${version}`;
   const marker = `${DRAFT_COMMENT_MARKER_PREFIX}${version} -->`;
+  const { owner, repo } = context.repo;
 
-  core.info(`Release published: ${version}`);
-  core.info(`Searching for PR comment with marker: ${marker}`);
-
-  // Get authenticated user for author filtering
-  let authenticatedLogin = null;
   try {
-    const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
-      retries: 2,
-      baseDelay: 1000,
-      description: 'Get authenticated user'
+    let authenticatedLogin;
+    try {
+      ({
+        data: { login: authenticatedLogin }
+      } = await octokit.rest.users.getAuthenticated());
+    } catch (error) {
+      // Installation tokens (e.g. GITHUB_TOKEN) cannot call this endpoint
+      core.debug(`Could not determine authenticated user: ${error.message}`);
+    }
+    const isOwnComment = comment =>
+      authenticatedLogin ? comment.user?.login === authenticatedLogin : comment.user?.type === 'Bot';
+
+    const releaseCommit = await getTagCommit(octokit, context, version);
+    const { data: commit } = await octokit.rest.git.getCommit({ owner, repo, commit_sha: releaseCommit });
+    const sourceCommit = commit.parents?.[0]?.sha;
+    if (!sourceCommit) {
+      core.info(`Release commit for ${version} has no parent; skipping PR reminder update`);
+      return;
+    }
+
+    const prs = await octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+      owner,
+      repo,
+      commit_sha: sourceCommit,
+      per_page: 100
     });
-    authenticatedLogin = authUser.login;
-    core.debug(`Authenticated as: ${authenticatedLogin}`);
-  } catch (error) {
-    core.debug(`Could not determine authenticated user: ${error.message}`);
-  }
-
-  try {
-    // Resolve the tag to its commit SHA, then find associated PRs deterministically
-    const { data: tagRef } = await retryWithBackoff(
-      () =>
-        octokit.rest.git.getRef({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          ref: `tags/${version}`
-        }),
-      { retries: 2, baseDelay: 1000, description: `Get tag ref for ${version}` }
-    );
-
-    const commitSha = tagRef.object.sha;
-    core.debug(`Tag ${version} points to commit ${commitSha}`);
-
-    const { data: associatedPrs } = await retryWithBackoff(
-      () =>
-        octokit.rest.repos.listPullRequestsAssociatedWithCommit({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          commit_sha: commitSha,
-          per_page: 30
-        }),
-      { retries: 2, baseDelay: 1000, description: 'List PRs associated with tag commit' }
-    );
-
-    // Filter to merged PRs only
-    const mergedPrs = associatedPrs.filter(pr => pr.merged_at);
-    core.debug(`Found ${mergedPrs.length} merged PR(s) associated with tag commit`);
-
-    let updatedCount = 0;
-    for (const pr of mergedPrs) {
-      try {
-        const { data: comments } = await retryWithBackoff(
-          () =>
-            octokit.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              per_page: 100,
-              direction: 'desc'
-            }),
-          { retries: 2, baseDelay: 1000, description: `List comments on PR #${pr.number}` }
-        );
-
-        // Match by version-specific marker, or fallback to legacy comment shape
-        const markerComment = comments.find(c => {
-          if (!c.body) return false;
-          // Skip if we know the author and it's not us
-          if (authenticatedLogin && c.user?.login !== authenticatedLogin) return false;
-          // Primary: version-specific marker
-          if (c.body.includes(marker)) return true;
-          // Fallback: legacy comments without marker (created before this feature)
-          // Only use fallback when author is confirmed to avoid updating someone else's comment
-          if (authenticatedLogin && c.body.includes('## 📦 Draft Release Created') && c.body.includes(`**${version}**`))
-            return true;
-          return false;
-        });
-
-        if (markerComment) {
-          // Check if already updated
-          if (markerComment.body.includes('## ✅ Release Published')) {
-            core.info(`PR #${pr.number} comment already shows published state, skipping`);
-            continue;
-          }
-
-          const updatedBody = buildPublishedReminderBody(version, releaseUrl);
-
-          await retryWithBackoff(
-            () =>
-              octokit.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: markerComment.id,
-                body: updatedBody
-              }),
-            { retries: 2, baseDelay: 1000, description: `Update comment on PR #${pr.number}` }
-          );
-
-          core.info(`✅ Updated PR comment on PR #${pr.number}`);
-          updatedCount++;
-        }
-      } catch (error) {
-        core.warning(`Could not update comment on PR #${pr.number}: ${error.message}`);
-      }
+    const mergedPr = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))[0];
+    if (!mergedPr) {
+      core.info(`No merged PR found for ${version}; skipping PR reminder update`);
+      return;
     }
 
-    if (updatedCount === 0) {
-      core.info(`No PR comment found with marker for ${version}`);
+    const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+      owner,
+      repo,
+      issue_number: mergedPr.number,
+      per_page: 100
+    });
+    const reminder = comments.find(
+      comment =>
+        comment.body &&
+        isOwnComment(comment) &&
+        (comment.body.includes(marker) ||
+          // Reminders posted before the marker existed
+          (comment.body.includes('## 📦 Draft Release Created') && comment.body.includes(`**${version}**`)))
+    );
+    if (!reminder) {
+      core.info(`No draft release reminder for ${version} found on PR #${mergedPr.number}`);
+      return;
     }
+
+    const body = buildPublishedReminderBody(version, release.html_url);
+    if (reminder.body === body) {
+      core.info(`PR #${mergedPr.number} reminder already shows ${version} as published`);
+      return;
+    }
+
+    await octokit.rest.issues.updateComment({ owner, repo, comment_id: reminder.id, body });
+    core.info(`Updated draft release reminder on PR #${mergedPr.number}`);
   } catch (error) {
-    core.warning(`Could not update PR comment: ${error.message}`);
+    core.warning(`Could not update draft release reminder for ${version}: ${error.message}`);
   }
 }
 
@@ -480,43 +580,116 @@ export async function run() {
   try {
     const githubToken = core.getInput('github_token', { required: true });
     const githubApiUrl = core.getInput('github_api_url', { required: false });
-    const npmPackageCommand = core.getInput('npm_package_command', { required: false });
-    const commitNodeModules = core.getInput('commit_node_modules', { required: false });
-    const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
-    const publishMinorVersion = core.getInput('publish_minor_version', { required: false });
-    const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
-    const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
-    const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
-    const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
+    const mode = core.getInput('mode', { required: false }) || 'publish';
+    if (mode !== 'publish' && mode !== 'promote') {
+      throw new Error(`Invalid mode "${mode}"; expected "publish" or "promote"`);
+    }
 
     const context = github.context;
     const opts = githubApiUrl ? { baseUrl: githubApiUrl } : {};
     const octokit = github.getOctokit(githubToken, opts);
+    const publishMinorVersion = core.getInput('publish_minor_version', { required: false }) === 'true';
 
-    // Handle release.published event — update the draft PR reminder comment
-    if (context.eventName === 'release' && context.payload?.action === 'published') {
-      if (draftReleasePrReminder === 'true') {
-        await handleReleasePublished(octokit, context);
+    if (mode === 'promote') {
+      const eventRelease = context.payload?.release;
+      const releaseTag = core.getInput('release_tag', { required: false }).trim();
+      let release;
+      if (context.eventName === 'release' && ['published', 'released'].includes(context.payload?.action)) {
+        if (!eventRelease?.id) {
+          throw new Error('The release event payload does not include a release');
+        }
+        ({ data: release } = await octokit.rest.repos.getRelease({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          release_id: eventRelease.id
+        }));
+        if (release.id !== eventRelease.id || release.tag_name !== eventRelease.tag_name || release.draft) {
+          throw new Error('The release event does not match a live, published release');
+        }
+      } else if (releaseTag) {
+        // Manual recovery: e.g. drafts created before the release listener existed in the tagged commit
+        try {
+          ({ data: release } = await octokit.rest.repos.getReleaseByTag({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            tag: releaseTag
+          }));
+        } catch (error) {
+          if (error.status === 404) {
+            throw new Error(`No published release found for tag ${releaseTag}`);
+          }
+          throw error;
+        }
       } else {
-        core.info('Skipping PR comment update (draft_release_pr_reminder is disabled)');
+        throw new Error('mode: promote requires a release published/released event or the release_tag input');
       }
-      core.info('✅ Release published event handled!');
+      await promoteReleaseTags(octokit, context, release, publishMinorVersion);
+      if (core.getInput('draft_release_pr_reminder', { required: false }) === 'true') {
+        await updateDraftReminderComment(octokit, context, release);
+      }
+      core.info('✅ Action completed successfully!');
       return;
     }
 
+    const npmPackageCommand = core.getInput('npm_package_command', { required: false });
+    const commitNodeModules = core.getInput('commit_node_modules', { required: false });
+    const commitDistFolder = core.getInput('commit_dist_folder', { required: false });
+    const releaseWorkflowFile = core.getInput('release_workflow_file', { required: false }).replace(/\\/g, '/');
+    if (
+      releaseWorkflowFile &&
+      (!/^\.github\/workflows\/[^/]+\.(yml|yaml)$/.test(releaseWorkflowFile) || releaseWorkflowFile.includes('..'))
+    ) {
+      throw new Error('release_workflow_file must be a workflow path under .github/workflows/');
+    }
+    const publishReleaseVersion = core.getInput('publish_release_branch', { required: false });
+    const createReleaseAsDraft = core.getInput('create_release_as_draft', { required: false });
+    const draftReleasePrReminder = core.getInput('draft_release_pr_reminder', { required: false });
+    const commentOnLinkedIssues = core.getInput('comment_on_linked_issues', { required: false });
+    const skipReleaseLabel = core.getInput('skip_release_label', { required: false });
+
     const json = JSON.parse(readFileSync('package.json', 'utf8'));
     const version = `v${json.version}`;
-    const minorVersion = `v${semver.major(json.version)}.${semver.minor(json.version)}`;
-    const majorVersion = `v${semver.major(json.version)}`;
     const branchName = `releases/${version}`;
 
-    const tags = await octokit.rest.repos.listTags({
+    // Exact-ref lookup; listing tags is paginated and would miss older versions
+    const { data: matchingRefs } = await octokit.rest.git.listMatchingRefs({
       owner: context.repo.owner,
-      repo: context.repo.repo
+      repo: context.repo.repo,
+      ref: `tags/${version}`
     });
 
-    if (tags.data.some(tag => tag.name === version)) {
+    if (matchingRefs.some(ref => ref.ref === `refs/tags/${version}`)) {
       core.info(`Tag ${version} already exists`);
+      // Let a rerun finish promotion if a previous run published the release but failed before moving aliases.
+      let existingRelease;
+      try {
+        ({ data: existingRelease } = await octokit.rest.repos.getReleaseByTag({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          tag: version
+        }));
+      } catch (error) {
+        if (error.status !== 404) {
+          throw error;
+        }
+      }
+      if (existingRelease && !existingRelease.draft) {
+        await promoteReleaseTags(octokit, context, existingRelease, publishMinorVersion);
+      }
+      return;
+    }
+
+    const prs = await octokit.paginate(octokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      commit_sha: context.sha,
+      per_page: 100
+    });
+    const mergedPrs = prs.filter(pr => pr.merged_at).sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+    const mergedPr = mergedPrs[0];
+
+    if (mergedPr?.labels?.some(label => label.name?.toLowerCase() === skipReleaseLabel.toLowerCase())) {
+      core.info(`Skipping release because PR #${mergedPr.number} has the "${skipReleaseLabel}" label`);
       return;
     }
 
@@ -550,10 +723,22 @@ export async function run() {
       await exec.exec('git add -f dist');
     }
 
-    // Remove .github folder from local git (for Git CLI path)
-    // API path also removes .github by marking files for deletion in the tree
-    // Use --ignore-unmatch to avoid failure if .github doesn't exist
-    await exec.exec('git', ['rm', '-r', '--ignore-unmatch', '.github']);
+    // Remove .github files from the release tree, except the workflow that handles published releases.
+    if (releaseWorkflowFile) {
+      const trackedWorkflow = await exec.exec('git', ['ls-files', '--error-unmatch', '--', releaseWorkflowFile], {
+        ignoreReturnCode: true
+      });
+      if (trackedWorkflow !== 0) {
+        throw new Error(`release_workflow_file ${releaseWorkflowFile} does not exist in the source tree`);
+      }
+    }
+    const githubRmArgs = ['rm', '-r', '--ignore-unmatch'];
+    if (releaseWorkflowFile) {
+      githubRmArgs.push('--', '.github', `:!${releaseWorkflowFile}`);
+    } else {
+      githubRmArgs.push('.github');
+    }
+    await exec.exec('git', githubRmArgs);
 
     // Use API for verified commits when not committing node_modules
     // Otherwise fall back to git CLI (node_modules too large for API)
@@ -580,7 +765,14 @@ export async function run() {
       // Push branch first so API can reference it
       await exec.exec('git', ['push', 'origin', branchName]);
 
-      commitSha = await createCommitViaAPI(octokit, context, branchName, version, commitDistFolder);
+      commitSha = await createCommitViaAPI(
+        octokit,
+        context,
+        branchName,
+        version,
+        commitDistFolder,
+        releaseWorkflowFile
+      );
 
       // Fetch the commit created via API so local git knows about it
       await exec.exec('git', ['fetch', 'origin', branchName]);
@@ -594,25 +786,9 @@ export async function run() {
     await exec.exec('git', ['tag', '-fa', version, '-m', version, commitSha]);
     core.info(`Created annotated tag ${version}`);
 
-    if (publishMinorVersion === 'true') {
-      await exec.exec('git', ['tag', '-fa', minorVersion, '-m', minorVersion, commitSha]);
-      core.info(`Created annotated tag ${minorVersion}`);
-    }
-
-    await exec.exec('git', ['tag', '-fa', majorVersion, '-m', majorVersion, commitSha]);
-    core.info(`Created annotated tag ${majorVersion}`);
-
-    // Push tags atomically (force push to update existing tags)
-    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${version}`]);
+    // The exact release tag is immutable; floating aliases are promoted only after publication.
+    await exec.exec('git', ['push', 'origin', `refs/tags/${version}`]);
     core.info(`Pushed tag ${version}`);
-
-    if (publishMinorVersion === 'true') {
-      await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${minorVersion}`]);
-      core.info(`Pushed tag ${minorVersion}`);
-    }
-
-    await exec.exec('git', ['push', '--force', 'origin', `refs/tags/${majorVersion}`]);
-    core.info(`Pushed tag ${majorVersion}`);
 
     // Clean up release branch if not publishing
     if (publishReleaseVersion !== 'true') {
@@ -696,45 +872,45 @@ export async function run() {
       draft: createReleaseAsDraft === 'true'
     });
 
+    if (!release.data.draft) {
+      const { data: confirmedRelease } = await octokit.rest.repos.getRelease({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        release_id: release.data.id
+      });
+      if (confirmedRelease.draft || confirmedRelease.tag_name !== version) {
+        throw new Error(`Release ${version} could not be confirmed as published`);
+      }
+      await promoteReleaseTags(octokit, context, confirmedRelease, publishMinorVersion);
+    } else {
+      core.info(
+        `Draft release ${version} created; floating version tags will not move until the release is published (use mode: promote on release published)`
+      );
+    }
+
     // Post reminder comment on merged PR if draft release was created
-    if (createReleaseAsDraft === 'true' && draftReleasePrReminder === 'true') {
-      try {
-        // Find the PR associated with the current commit (the merge commit)
-        const commitShaForPr = context.sha;
-        const { data: prs } = await octokit.rest.repos.listPullRequestsAssociatedWithCommit({
-          owner: context.repo.owner,
-          repo: context.repo.repo,
-          commit_sha: commitShaForPr
-        });
+    if (createReleaseAsDraft === 'true' && draftReleasePrReminder !== 'false') {
+      if (mergedPr) {
+        const releaseUrl = release.data.html_url;
 
-        if (prs.length > 0) {
-          // Get the most recently merged PR by sorting by merged_at date descending
-          const mergedPrs = prs
-            .filter(pr => pr.merged_at)
-            .sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at));
+        const commentBody = buildDraftReminderBody(version, releaseUrl);
 
-          if (mergedPrs.length === 0) {
-            core.info('No merged PR found for this commit, skipping PR comment');
-          } else {
-            const mergedPr = mergedPrs[0];
-            const releaseUrl = release.data.html_url;
+        try {
+          await octokit.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: mergedPr.number,
+            body: commentBody
+          });
 
-            const commentBody = buildDraftReminderBody(version, releaseUrl);
-
-            await octokit.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: mergedPr.number,
-              body: commentBody
-            });
-
-            core.info(`Posted reminder comment on PR #${mergedPr.number}`);
-          }
-        } else {
-          core.info('No associated PR found for this commit');
+          core.info(`Posted reminder comment on PR #${mergedPr.number}`);
+        } catch (error) {
+          core.warning(`Could not post PR comment: ${error.message}`);
         }
-      } catch (error) {
-        core.warning(`Could not post PR comment: ${error.message}`);
+      } else if (prs.length > 0) {
+        core.info('No merged PR found for this commit, skipping PR comment');
+      } else {
+        core.info('No associated PR found for this commit');
       }
     }
 
@@ -747,20 +923,6 @@ export async function run() {
           core.info('No pull request references found in release notes');
         } else {
           core.info(`Found ${prNumbers.length} PR(s) in release notes: ${prNumbers.join(', ')}`);
-
-          // Get authenticated user for idempotency author filtering
-          let authenticatedLogin = null;
-          try {
-            const { data: authUser } = await retryWithBackoff(() => octokit.rest.users.getAuthenticated(), {
-              retries: 2,
-              baseDelay: 1000,
-              description: 'Get authenticated user'
-            });
-            authenticatedLogin = authUser.login;
-            core.debug(`Authenticated as: ${authenticatedLogin}`);
-          } catch (error) {
-            core.debug(`Could not determine authenticated user: ${error.message}`);
-          }
 
           // Query GraphQL for closing issue references on each PR (with pagination)
           const linkedIssues = new Set();
@@ -847,27 +1009,39 @@ export async function run() {
                   { retries: 2, baseDelay: 1000, description: `List comments on issue #${issueNumber}` }
                 );
 
-                // Only consider marker comments authored by us; skip if we couldn't determine identity
-                const existingComment =
-                  authenticatedLogin === null
-                    ? null
-                    : existingComments.find(
-                        c => c.body?.includes(RELEASE_COMMENT_MARKER) && c.user?.login === authenticatedLogin
-                      );
+                const existingComment = existingComments.find(c => c.body?.includes(RELEASE_COMMENT_MARKER));
 
                 if (existingComment) {
                   if (existingComment.body !== commentBody) {
-                    await retryWithBackoff(
-                      () =>
-                        octokit.rest.issues.updateComment({
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          comment_id: existingComment.id,
-                          body: commentBody
-                        }),
-                      { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
-                    );
-                    core.info(`Updated release comment on issue #${issueNumber}`);
+                    try {
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.updateComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            comment_id: existingComment.id,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Update comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Updated release comment on issue #${issueNumber}`);
+                    } catch (error) {
+                      if (error.status !== 403 && error.status !== 404) {
+                        throw error;
+                      }
+
+                      await retryWithBackoff(
+                        () =>
+                          octokit.rest.issues.createComment({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            issue_number: issueNumber,
+                            body: commentBody
+                          }),
+                        { retries: 2, baseDelay: 1000, description: `Create comment on issue #${issueNumber}` }
+                      );
+                      core.info(`Posted release comment on issue #${issueNumber}`);
+                    }
                   } else {
                     core.info(`Release comment on issue #${issueNumber} is already up to date`);
                   }

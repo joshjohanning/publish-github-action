@@ -12,6 +12,16 @@ inputs:
     description: 'GitHub API URL (e.g., https://api.github.com for GitHub.com or https://ghes.domain.com/api/v3 for GHES)'
     required: false
     default: '${{ github.api_url }}'
+  mode:
+    description: 'publish (default) builds, tags, and creates the release. promote moves the floating major (and optional minor) tags to an already published release; run it on the release published/released events, or manually with release_tag.'
+    default: 'publish'
+    required: false
+  release_tag:
+    description: 'Exact release tag (e.g. v2.1.2) to promote in mode: promote when not triggered by a release event, e.g. from workflow_dispatch to recover a release whose tag has no release listener'
+    required: false
+  release_workflow_file:
+    description: 'Optional .yml or .yaml file directly under .github/workflows/ to retain in the release tag so it can handle release published/released events'
+    required: false
   npm_package_command:
     description: 'Command to build the action'
     default: 'npm run package'
@@ -33,16 +43,20 @@ inputs:
     default: 'false'
     required: false
   create_release_as_draft:
-    description: 'Change to true to create release as draft'
+    description: 'Change to true to create release as draft. Only the exact version tag is pushed; floating major/minor tags are not moved until the release is published (see mode: promote)'
     default: 'false'
     required: false
   draft_release_pr_reminder:
-    description: 'Post a reminder comment on the merged PR when creating a draft release. When the release is later published (requires `on: release: types: [published]` trigger), the comment is updated to show the published state with checked-off steps.'
+    description: 'Post a reminder comment on the merged PR when creating a draft release. In mode: promote, update that comment to show the release as published'
     default: 'false'
     required: false
   comment_on_linked_issues:
     description: 'Comment on closed issues linked to PRs in the release notes to notify followers of the release. Comments are posted for both published and draft releases; updated idempotently on rerun.'
     default: 'false'
+    required: false
+  skip_release_label:
+    description: 'Skip publishing when the most recently merged PR for the commit has this label (case-insensitive)'
+    default: 'skip-release'
     required: false
 runs:
   using: 'node24'

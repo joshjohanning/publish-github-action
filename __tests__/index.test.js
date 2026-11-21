@@ -38,9 +38,10 @@ const mockGithub = {
 const mockOctokit = {
   rest: {
     repos: {
-      listTags: jest.fn(),
       listReleases: jest.fn(),
       createRelease: jest.fn(),
+      getRelease: jest.fn(),
+      getReleaseByTag: jest.fn(),
       listPullRequestsAssociatedWithCommit: jest.fn()
     },
     git: {
@@ -52,6 +53,8 @@ const mockOctokit = {
       updateRef: jest.fn(),
       deleteRef: jest.fn(),
       createTag: jest.fn(),
+      getTag: jest.fn(),
+      listMatchingRefs: jest.fn(),
       createRef: jest.fn()
     },
     issues: {
@@ -116,11 +119,20 @@ jest.unstable_mockModule('semver', () => ({
   minor: mockSemver.minor,
   valid: realSemver.default.valid,
   lt: realSemver.default.lt,
+  gt: realSemver.default.gt,
+  prerelease: realSemver.default.prerelease,
   rcompare: realSemver.default.rcompare
 }));
 
 // Import the main module after mocking
-const { default: run, retryWithBackoff, isTransientError, parsePullRequestNumbers } = await import('../src/index.js');
+const {
+  default: run,
+  retryWithBackoff,
+  isTransientError,
+  parsePullRequestNumbers,
+  buildDraftReminderBody,
+  buildPublishedReminderBody
+} = await import('../src/index.js');
 
 describe('Publish GitHub Action', () => {
   beforeEach(() => {
@@ -146,7 +158,8 @@ describe('Publish GitHub Action', () => {
         publish_minor_version: 'false',
         publish_release_branch: 'false',
         create_release_as_draft: 'false',
-        draft_release_pr_reminder: 'true'
+        draft_release_pr_reminder: 'true',
+        skip_release_label: 'skip-release'
       };
       return inputs[name] || '';
     });
@@ -171,12 +184,26 @@ describe('Publish GitHub Action', () => {
     mockExec.exec.mockResolvedValue(0);
 
     // Mock GitHub API calls
-    mockOctokit.rest.repos.listTags.mockResolvedValue({ data: [] });
-    mockOctokit.paginate.mockResolvedValue([]);
-    mockOctokit.paginate.iterator.mockImplementation(() => asyncPages([]));
-    mockOctokit.rest.repos.createRelease.mockResolvedValue({
-      data: { id: 123, html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3' }
+    mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({ data: [] });
+    mockOctokit.paginate.mockImplementation(async (method, options) => {
+      if (method === mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit) {
+        return (await method(options)).data;
+      }
+      return [];
     });
+    mockOctokit.paginate.iterator.mockImplementation(() => asyncPages([]));
+    mockOctokit.rest.repos.createRelease.mockImplementation(async params => ({
+      data: {
+        id: 123,
+        tag_name: params.tag_name,
+        draft: params.draft,
+        prerelease: false,
+        html_url: 'https://github.com/test-owner/test-repo/releases/tag/v1.2.3'
+      }
+    }));
+    mockOctokit.rest.repos.getRelease.mockImplementation(async ({ release_id }) => ({
+      data: { id: release_id, tag_name: 'v1.2.3', draft: false, prerelease: false }
+    }));
     mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
     mockOctokit.rest.issues.createComment.mockResolvedValue({ data: { id: 456 } });
     mockOctokit.rest.issues.updateComment.mockResolvedValue({ data: { id: 456 } });
@@ -192,7 +219,13 @@ describe('Publish GitHub Action', () => {
     mockOctokit.request.mockResolvedValue({ data: { body: 'Generated release notes' } });
 
     // Mock Git API calls
-    mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'abc123' } } });
+    // Floating aliases (e.g. tags/v1) resolve to an older commit so promotion moves them by default
+    mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => ({
+      data: { object: { sha: /^tags\/v\d+(\.\d+)?$/.test(ref) ? 'old-alias-commit' : 'abc123', type: 'commit' } }
+    }));
+    const releaseNotFound = new Error('Not Found');
+    releaseNotFound.status = 404;
+    mockOctokit.rest.repos.getReleaseByTag.mockRejectedValue(releaseNotFound);
     mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { tree: { sha: 'tree123' } } });
     mockOctokit.rest.git.getTree.mockResolvedValue({ data: { tree: [] } }); // Empty tree by default
     mockOctokit.rest.git.createTree.mockResolvedValue({ data: { sha: 'newtree123' } });
@@ -209,20 +242,161 @@ describe('Publish GitHub Action', () => {
 
       expect(mockCore.getInput).toHaveBeenCalledWith('github_token', { required: true });
       expect(mockFs.readFileSync).toHaveBeenCalledWith('package.json', 'utf8');
-      expect(mockOctokit.rest.repos.listTags).toHaveBeenCalled();
+      expect(mockOctokit.rest.git.listMatchingRefs).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1.2.3' })
+      );
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v1.2.3']);
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });
 
     test('should skip if tag already exists', async () => {
-      mockOctokit.rest.repos.listTags.mockResolvedValue({
-        data: [{ name: 'v1.2.3' }]
+      mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({
+        data: [{ ref: 'refs/tags/v1.2.3' }]
       });
 
       await run();
 
       expect(mockExec.exec).not.toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v1.2.3']);
       expect(mockCore.info).not.toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should not treat a tag that only shares the version prefix as existing', async () => {
+      mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({
+        data: [{ ref: 'refs/tags/v1.2.30' }]
+      });
+
+      await run();
+
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v1.2.3']);
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should skip publishing when the merged PR has the skip release label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping release because PR #42 has the "skip-release" label');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['skip-release', 'Skip-Release'],
+      ['NO-PUBLISH', 'no-publish']
+    ])('should match configured label "%s" to "%s" case-insensitively', async (configuredLabel, labelName) => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? configuredLabel : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: labelName }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a different label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [{ number: 42, merged_at: '2024-01-15T10:00:00Z', labels: [{ name: 'skip-release-later' }] }]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should check the most recently merged PR on a later page', async () => {
+      const firstPage = Array.from({ length: 100 }, (_, index) => ({
+        number: index + 1,
+        merged_at: '2024-01-10T10:00:00Z',
+        labels: []
+      }));
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit
+        .mockResolvedValueOnce({ data: firstPage })
+        .mockResolvedValueOnce({
+          data: [{ number: 101, merged_at: '2024-01-20T10:00:00Z', labels: [{ name: 'skip-release' }] }]
+        });
+      mockOctokit.paginate.mockImplementation(async (method, options) => {
+        const pageOne = await method({ ...options, page: 1 });
+        const pageTwo = await method({ ...options, page: 2 });
+        return [...pageOne.data, ...pageTwo.data];
+      });
+
+      await run();
+
+      expect(mockOctokit.paginate).toHaveBeenCalledWith(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit, {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        commit_sha: 'abc123def456',
+        per_page: 100
+      });
+      expect(mockCore.info).toHaveBeenCalledWith('Skipping release because PR #101 has the "skip-release" label');
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should publish when only an older merged PR has the skip release label', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 10, merged_at: '2024-01-10T10:00:00Z', labels: [{ name: 'skip-release' }] },
+          { number: 20, merged_at: '2024-01-20T10:00:00Z', labels: [] }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not skip publishing for a PR that has not merged yet', async () => {
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: null,
+            labels: [{ name: 'skip-release' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalled();
+    });
+
+    test('should honor a custom skip release label', async () => {
+      const getDefaultInput = mockCore.getInput.getMockImplementation();
+      mockCore.getInput.mockImplementation(name =>
+        name === 'skip_release_label' ? 'no-publish' : getDefaultInput(name)
+      );
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          {
+            number: 42,
+            merged_at: '2024-01-15T10:00:00Z',
+            labels: [{ name: 'no-publish' }]
+          }
+        ]
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
 
     test('should handle npm package command', async () => {
@@ -295,7 +469,7 @@ describe('Publish GitHub Action', () => {
 
       // Should create annotated tags via Git CLI
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', 'origin', 'refs/tags/v1.2.3']);
     });
 
     test('should publish minor version when enabled', async () => {
@@ -311,9 +485,13 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should create minor version tag via Git CLI
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2', '-m', 'v1.2', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2']);
+      // Minor version tag is promoted via API after the release is confirmed published
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v1.2', object: 'abc123', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1.2', sha: 'tag123', force: true })
+      );
     });
 
     test('should publish release branch when enabled', async () => {
@@ -594,21 +772,29 @@ describe('Publish GitHub Action', () => {
       );
       mockSemver.major.mockReturnValue(2);
       mockSemver.minor.mockReturnValue(0);
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 123, tag_name: 'v2.0.0', draft: false, prerelease: false }
+      });
 
       await run();
 
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['checkout', '-b', 'releases/v2.0.0']);
       // Should create annotated tags via Git CLI
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2.0.0', '-m', 'v2.0.0', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v2', '-m', 'v2', 'commit123']);
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2' }));
     });
 
     test('should always create major version tag', async () => {
       await run();
 
-      // Major version tag should always be created via Git CLI
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1', '-m', 'v1', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1']);
+      // Major version tag is promoted via API for non-draft releases
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v1', message: 'v1', object: 'abc123', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1', sha: 'tag123', force: true })
+      );
+      expect(mockExec.exec).not.toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1']);
     });
   });
 
@@ -948,13 +1134,14 @@ describe('Publish GitHub Action', () => {
       expect(addedFiles).toHaveLength(3);
     });
 
-    test('should remove .github folder in API path', async () => {
+    test('should preserve the selected release workflow in the API path', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
           commit_node_modules: 'false',
           commit_dist_folder: 'true',
-          npm_package_command: 'npm run package'
+          npm_package_command: 'npm run package',
+          release_workflow_file: '.github/workflows/publish.yml'
         };
         return inputs[name] || '';
       });
@@ -963,8 +1150,11 @@ describe('Publish GitHub Action', () => {
       mockOctokit.rest.git.getTree.mockResolvedValue({
         data: {
           tree: [
+            { path: '.github', mode: '040000', type: 'tree', sha: 'github-tree' },
+            { path: '.github/workflows', mode: '040000', type: 'tree', sha: 'workflows-tree' },
             { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' },
             { path: '.github/workflows/test.yml', mode: '100644', type: 'blob', sha: 'workflow2' },
+            { path: '.github/workflows/publish.yml', mode: '100644', type: 'blob', sha: 'publish-workflow' },
             { path: '.github/dependabot.yml', mode: '100644', type: 'blob', sha: 'dependabot' },
             { path: 'dist/index.js', mode: '100644', type: 'blob', sha: 'dist1' },
             { path: 'README.md', mode: '100644', type: 'blob', sha: 'readmesha' }
@@ -981,7 +1171,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should mark all .github files for deletion
+      // Other .github files are removed, but the selected workflow remains in the release tree.
       expect(mockOctokit.rest.git.createTree).toHaveBeenCalledWith(
         expect.objectContaining({
           tree: expect.arrayContaining([
@@ -997,20 +1187,114 @@ describe('Publish GitHub Action', () => {
               path: '.github/dependabot.yml',
               sha: null
             })
-          ])
+          ]),
+          base_tree: 'tree123'
         })
       );
 
-      // Verify .github files are marked for deletion
       const createTreeCall = mockOctokit.rest.git.createTree.mock.calls[0][0];
       const deletedGithubFiles = createTreeCall.tree.filter(
         item => item.sha === null && item.path.startsWith('.github/')
       );
       expect(deletedGithubFiles).toHaveLength(3);
+      expect(deletedGithubFiles.some(file => file.path === '.github/workflows/publish.yml')).toBe(false);
+      expect(deletedGithubFiles.some(file => file.path === '.github/workflows')).toBe(false);
+      expect(createTreeCall.tree).not.toContainEqual(expect.objectContaining({ path: '.github/workflows', sha: null }));
+    });
+
+    test('should fail when the configured release workflow is absent from the API source tree', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'false',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+      mockOctokit.rest.git.getTree.mockResolvedValue({
+        data: {
+          tree: [
+            { path: '.github', mode: '040000', type: 'tree', sha: 'github-tree' },
+            { path: '.github/workflows', mode: '040000', type: 'tree', sha: 'workflows-tree' },
+            { path: '.github/workflows/ci.yml', mode: '100644', type: 'blob', sha: 'workflow1' }
+          ]
+        }
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file .github/workflows/publish.yml does not exist in the source tree'
+      );
+      expect(mockOctokit.rest.git.createTree).not.toHaveBeenCalled();
     });
   });
 
   describe('Git CLI path', () => {
+    test('should preserve the selected release workflow when removing .github files', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'true',
+          commit_dist_folder: 'false',
+          npm_package_command: '',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+
+      mockExec.exec.mockImplementation((cmd, args, options) => {
+        if (cmd === 'git' && args?.[0] === 'rev-parse' && args?.[1] === 'HEAD') {
+          options?.listeners?.stdout?.(Buffer.from('gitcommitsha123\n'));
+        }
+        return Promise.resolve(0);
+      });
+
+      await run();
+
+      expect(mockExec.exec).toHaveBeenCalledWith(
+        'git',
+        ['ls-files', '--error-unmatch', '--', '.github/workflows/publish.yml'],
+        { ignoreReturnCode: true }
+      );
+      expect(mockExec.exec).toHaveBeenCalledWith('git', [
+        'rm',
+        '-r',
+        '--ignore-unmatch',
+        '--',
+        '.github',
+        ':!.github/workflows/publish.yml'
+      ]);
+    });
+
+    test('should fail when the configured release workflow is untracked', async () => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_node_modules: 'true',
+          commit_dist_folder: 'false',
+          npm_package_command: '',
+          release_workflow_file: '.github/workflows/publish.yml'
+        };
+        return inputs[name] || '';
+      });
+      mockExec.exec.mockImplementation((cmd, args) => {
+        if (cmd === 'git' && args?.[0] === 'ls-files') {
+          return Promise.resolve(1);
+        }
+        return Promise.resolve(0);
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file .github/workflows/publish.yml does not exist in the source tree'
+      );
+      expect(mockExec.exec).not.toHaveBeenCalledWith('git', expect.arrayContaining(['rm', '-r', '--ignore-unmatch']));
+    });
+
     test('should use git CLI when committing node_modules', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
@@ -1042,7 +1326,7 @@ describe('Publish GitHub Action', () => {
 
       // Should create tags via Git CLI
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'gitcommitsha123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', 'origin', 'refs/tags/v1.2.3']);
 
       // Should NOT use API for commit
       expect(mockOctokit.rest.git.createCommit).not.toHaveBeenCalled();
@@ -1085,7 +1369,7 @@ describe('Publish GitHub Action', () => {
 
       // Should create tags via Git CLI with -f flag for atomic updates
       expect(mockExec.exec).toHaveBeenCalledWith('git', ['tag', '-fa', 'v1.2.3', '-m', 'v1.2.3', 'commit123']);
-      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', '--force', 'origin', 'refs/tags/v1.2.3']);
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', 'origin', 'refs/tags/v1.2.3']);
     });
   });
 
@@ -1171,7 +1455,8 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith({
         owner: 'test-owner',
         repo: 'test-repo',
-        commit_sha: 'abc123def456'
+        commit_sha: 'abc123def456',
+        per_page: 100
       });
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith({
@@ -1206,7 +1491,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1232,7 +1517,7 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalled();
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
 
@@ -1334,7 +1619,7 @@ describe('Publish GitHub Action', () => {
       });
     });
 
-    test('should handle PR comment API failure gracefully', async () => {
+    test('should fail publishing when the PR lookup fails', async () => {
       mockCore.getInput.mockImplementation(name => {
         const inputs = {
           github_token: 'test-token',
@@ -1358,9 +1643,8 @@ describe('Publish GitHub Action', () => {
 
       await run();
 
-      // Should warn but not fail
-      expect(mockCore.warning).toHaveBeenCalledWith('Could not post PR comment: API Error');
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+      expect(mockCore.setFailed).toHaveBeenCalledWith('API Error');
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
     });
   });
 
@@ -1701,13 +1985,12 @@ describe('Publish GitHub Action', () => {
       expect(createCalls).toHaveLength(1);
     });
 
-    test('should ignore marker comment authored by a different user', async () => {
+    test('should create a comment when a marker comment cannot be updated', async () => {
       setupLinkedIssuesTest();
       mockOctokit.request.mockResolvedValue({
         data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
       });
       mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // Marker comment exists but authored by someone else
       mockOctokit.paginate.mockImplementation((method, _opts) => {
         if (method === mockOctokit.rest.issues.listComments) {
           return Promise.resolve([
@@ -1720,14 +2003,25 @@ describe('Publish GitHub Action', () => {
         }
         return Promise.resolve([]);
       });
+      const forbiddenError = new Error('Resource not accessible by integration');
+      forbiddenError.status = 403;
+      mockOctokit.rest.issues.updateComment.mockRejectedValue(forbiddenError);
 
       await run();
 
-      // Should create a new comment, not update the foreign one
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
+      expect(mockOctokit.rest.users.getAuthenticated).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          comment_id: 888,
+          body: expect.stringContaining('shipped in **v1.2.3**')
+        })
       );
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issue_number: 10,
+          body: expect.stringContaining('shipped in **v1.2.3**')
+        })
+      );
     });
 
     test('should paginate closingIssuesReferences across multiple pages', async () => {
@@ -1753,37 +2047,6 @@ describe('Publish GitHub Action', () => {
       expect(mockOctokit.graphql).toHaveBeenCalledTimes(2);
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 10 }));
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(expect.objectContaining({ issue_number: 20 }));
-    });
-
-    test('should create new comment when getAuthenticated fails and marker exists from other user', async () => {
-      setupLinkedIssuesTest();
-      mockOctokit.request.mockResolvedValue({
-        data: { body: '* Fix in https://github.com/test-owner/test-repo/pull/42\n' }
-      });
-      mockOctokit.graphql.mockResolvedValue(graphqlClosingIssuesResponse([{ number: 10 }]));
-      // getAuthenticated fails — authenticatedLogin will be null
-      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Token lacks user scope'));
-      // Marker comment exists from another user
-      mockOctokit.paginate.mockImplementation((method, _opts) => {
-        if (method === mockOctokit.rest.issues.listComments) {
-          return Promise.resolve([
-            {
-              id: 777,
-              user: { login: 'someone-else' },
-              body: '<!-- publish-github-action-release -->\n🚀 This has been shipped in **v1.0.0**! ([Release notes](https://old))'
-            }
-          ]);
-        }
-        return Promise.resolve([]);
-      });
-
-      await run();
-
-      // With null auth, should create new rather than risk updating foreign comment
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({ issue_number: 10, body: expect.stringContaining('shipped in **v1.2.3**') })
-      );
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
     });
   });
 
@@ -1994,6 +2257,309 @@ describe('Publish GitHub Action', () => {
     });
   });
 
+  describe('Floating tag promotion', () => {
+    const setInputs = overrides => {
+      mockCore.getInput.mockImplementation(name => {
+        const inputs = {
+          github_token: 'test-token',
+          commit_dist_folder: 'true',
+          npm_package_command: 'npm run package',
+          ...overrides
+        };
+        return inputs[name] || '';
+      });
+    };
+
+    beforeEach(() => {
+      mockSemver.major.mockImplementation(realSemver.default.major);
+      mockSemver.minor.mockImplementation(realSemver.default.minor);
+    });
+
+    const releaseEvent = release => {
+      mockGithub.context.eventName = 'release';
+      mockGithub.context.payload = { action: 'published', release };
+    };
+
+    afterEach(() => {
+      delete mockGithub.context.eventName;
+      delete mockGithub.context.payload;
+    });
+
+    test('should only push the exact version tag for draft releases', async () => {
+      setInputs({ create_release_as_draft: 'true', publish_minor_version: 'true' });
+
+      await run();
+
+      expect(mockExec.exec).toHaveBeenCalledWith('git', ['push', 'origin', 'refs/tags/v1.2.3']);
+      expect(mockOctokit.rest.repos.createRelease).toHaveBeenCalledWith(expect.objectContaining({ draft: true }));
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.createRef).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1' }));
+      expect(mockOctokit.rest.repos.getRelease).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('floating version tags will not move'));
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should fail on an invalid mode', async () => {
+      setInputs({ mode: 'bogus' });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('Invalid mode "bogus"; expected "publish" or "promote"');
+    });
+
+    test('should reject a release workflow in a nested directory', async () => {
+      setInputs({ release_workflow_file: '.github/workflows/nested/publish.yml' });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'release_workflow_file must be a workflow path under .github/workflows/'
+      );
+      expect(mockExec.exec).not.toHaveBeenCalled();
+    });
+
+    test('should require a release published event in promote mode', async () => {
+      setInputs({ mode: 'promote' });
+      mockGithub.context.eventName = 'push';
+      mockGithub.context.payload = {};
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith(
+        'mode: promote requires a release published/released event or the release_tag input'
+      );
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+    });
+
+    test('should promote major and minor tags to the released tag commit without rebuilding', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false }
+      });
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => {
+        if (ref === 'tags/v2.1.2') {
+          return { data: { object: { sha: 'annotated-tag-sha', type: 'tag' } } };
+        }
+        return { data: { object: { sha: 'old-alias-sha', type: 'tag' } } };
+      });
+      mockOctokit.rest.git.getTag.mockImplementation(async ({ tag_sha }) => ({
+        data: { object: { sha: tag_sha === 'annotated-tag-sha' ? 'release-commit' : 'old-commit', type: 'commit' } }
+      }));
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([
+          [
+            { id: 55, tag_name: 'v2.1.2', draft: false, prerelease: false },
+            { id: 54, tag_name: 'v2.1.1', draft: false, prerelease: false },
+            { id: 56, tag_name: 'v2.2.0', draft: true, prerelease: false },
+            { id: 57, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true }
+          ]
+        ])
+      );
+
+      await run();
+
+      expect(mockOctokit.rest.repos.getRelease).toHaveBeenCalledWith(expect.objectContaining({ release_id: 55 }));
+      expect(mockOctokit.rest.git.getTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag_sha: 'annotated-tag-sha' })
+      );
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v2', object: 'release-commit', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(
+        expect.objectContaining({ tag: 'v2.1', object: 'release-commit', type: 'commit' })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v2', sha: 'tag123', force: true })
+      );
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v2.1', sha: 'tag123', force: true })
+      );
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should derive aliases correctly for a semantic version without a v prefix', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 58, tag_name: '1.2.3', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 58, tag_name: '1.2.3', draft: false, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1' }));
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1.2' }));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should create the floating tag ref when it does not exist yet', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 1, tag_name: 'v4.0.0', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 1, tag_name: 'v4.0.0', draft: false, prerelease: false }
+      });
+      const notFound = new Error('Not Found');
+      notFound.status = 404;
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => {
+        if (ref === 'tags/v4.0.0') {
+          return { data: { object: { sha: 'release-commit', type: 'commit' } } };
+        }
+        throw notFound;
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'refs/tags/v4', sha: 'tag123' })
+      );
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not move the major tag backwards when publishing a backport', async () => {
+      setInputs({ mode: 'promote', publish_minor_version: 'true' });
+      releaseEvent({ id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false }
+      });
+      mockOctokit.paginate.iterator.mockImplementation(() =>
+        asyncPages([
+          [
+            { id: 11, tag_name: 'v2.1.0', draft: false, prerelease: false },
+            { id: 10, tag_name: 'v2.0.7', draft: false, prerelease: false }
+          ]
+        ])
+      );
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2' }));
+      expect(mockOctokit.rest.git.createTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v2.0' }));
+      expect(mockCore.info).toHaveBeenCalledWith(
+        'Skipping major alias v2; a newer stable release is already published'
+      );
+    });
+
+    test('should promote on the released event when a prerelease becomes a full release', async () => {
+      setInputs({ mode: 'promote' });
+      mockGithub.context.eventName = 'release';
+      mockGithub.context.payload = {
+        action: 'released',
+        release: { id: 8, tag_name: 'v1.2.3', draft: false, prerelease: false }
+      };
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 8, tag_name: 'v1.2.3', draft: false, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1' }));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should promote an existing published release from the release_tag input', async () => {
+      setInputs({ mode: 'promote', release_tag: 'v1.2.3' });
+      mockGithub.context.eventName = 'workflow_dispatch';
+      mockGithub.context.payload = {};
+      mockOctokit.rest.repos.getReleaseByTag.mockResolvedValue({
+        data: { id: 9, tag_name: 'v1.2.3', draft: false, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.getReleaseByTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1.2.3' }));
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1' }));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should fail release_tag promotion when no published release exists', async () => {
+      setInputs({ mode: 'promote', release_tag: 'v1.2.3' });
+      mockGithub.context.eventName = 'workflow_dispatch';
+      mockGithub.context.payload = {};
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('No published release found for tag v1.2.3');
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+    });
+
+    test('should leave a floating tag alone when it already points to the release commit', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 5, tag_name: 'v1.2.3', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 5, tag_name: 'v1.2.3', draft: false, prerelease: false }
+      });
+      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'abc123', type: 'commit' } } });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.git.updateRef).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('Floating tag v1 already points to v1.2.3');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should resume promotion on rerun when the exact tag and published release already exist', async () => {
+      setInputs({});
+      mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({ data: [{ ref: 'refs/tags/v1.2.3' }] });
+      mockOctokit.rest.repos.getReleaseByTag.mockResolvedValue({
+        data: { id: 7, tag_name: 'v1.2.3', draft: false, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.repos.getReleaseByTag).toHaveBeenCalledWith(expect.objectContaining({ tag: 'v1.2.3' }));
+      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledWith(
+        expect.objectContaining({ ref: 'tags/v1', sha: 'tag123', force: true })
+      );
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should not promote on rerun when the existing tag has no published release', async () => {
+      setInputs({});
+      mockOctokit.rest.git.listMatchingRefs.mockResolvedValue({ data: [{ ref: 'refs/tags/v1.2.3' }] });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockExec.exec).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+    });
+
+    test('should skip promotion for prereleases', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 3, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 3, tag_name: 'v3.0.0-beta.1', draft: false, prerelease: true }
+      });
+
+      await run();
+
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('is a prerelease'));
+    });
+
+    test('should fail when the live release is still a draft', async () => {
+      setInputs({ mode: 'promote' });
+      releaseEvent({ id: 4, tag_name: 'v1.2.3', draft: false, prerelease: false });
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({
+        data: { id: 4, tag_name: 'v1.2.3', draft: true, prerelease: false }
+      });
+
+      await run();
+
+      expect(mockCore.setFailed).toHaveBeenCalledWith('The release event does not match a live, published release');
+      expect(mockOctokit.rest.git.createTag).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateRef retry behavior', () => {
     beforeEach(() => {
       jest.useFakeTimers();
@@ -2026,7 +2592,10 @@ describe('Publish GitHub Action', () => {
 
       await resultPromise;
 
-      expect(mockOctokit.rest.git.updateRef).toHaveBeenCalledTimes(2);
+      const branchUpdateCalls = mockOctokit.rest.git.updateRef.mock.calls.filter(([args]) =>
+        args.ref.startsWith('heads/')
+      );
+      expect(branchUpdateCalls).toHaveLength(2);
       expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Object does not exist'));
       expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });
@@ -2083,271 +2652,134 @@ describe('Publish GitHub Action', () => {
     });
   });
 
-  describe('release.published event (update draft PR comment)', () => {
-    const releasePayload = {
-      action: 'published',
-      release: {
-        tag_name: 'v1.2.3',
-        html_url: 'https://github.com/test-owner/test-repo/releases/tag/untagged-abc123def456'
-      }
+  describe('Draft release reminder update on promote', () => {
+    const release = {
+      id: 55,
+      tag_name: 'v2.1.2',
+      draft: false,
+      prerelease: false,
+      html_url: 'https://github.com/test-owner/test-repo/releases/tag/v2.1.2'
     };
+    const draftBody = buildDraftReminderBody('v2.1.2', 'https://github.com/test-owner/test-repo/releases/untagged-1');
+    const legacyBody =
+      '## 📦 Draft Release Created\n\nA draft release **v2.1.2** has been created for this PR.\n\n- [ ] Publish';
 
     beforeEach(() => {
-      mockGithubContext.eventName = 'release';
-      mockGithubContext.payload = releasePayload;
-
-      // Default: tag resolves to a commit, commit is associated with a merged PR
-      mockOctokit.rest.git.getRef.mockResolvedValue({ data: { object: { sha: 'tag-commit-sha' } } });
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({ data: [] });
-    });
-
-    it('should route release.published event to handleReleasePublished', async () => {
-      await run();
-
-      expect(mockOctokit.rest.git.getRef).toHaveBeenCalledWith(expect.objectContaining({ ref: 'tags/v1.2.3' }));
-      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith(
-        expect.objectContaining({ commit_sha: 'tag-commit-sha' })
-      );
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Release published: v1.2.3'));
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Release published event handled!');
-    });
-
-    it('should not read package.json or create releases on release event', async () => {
-      await run();
-
-      // These are part of the normal publish flow — should NOT be called
-      expect(mockOctokit.rest.repos.listTags).not.toHaveBeenCalled();
-      expect(mockOctokit.rest.repos.createRelease).not.toHaveBeenCalled();
-      expect(mockExec.exec).not.toHaveBeenCalled();
-    });
-
-    it('should skip when draft_release_pr_reminder is false', async () => {
-      mockCore.getInput.mockImplementation(name => {
-        if (name === 'draft_release_pr_reminder') return 'false';
-        if (name === 'github_token') return 'test-token';
-        if (name === 'github_api_url') return 'https://api.github.com';
-        return '';
+      mockGithub.context.eventName = 'release';
+      mockGithub.context.payload = { action: 'published', release };
+      mockSemver.major.mockImplementation(realSemver.default.major);
+      mockSemver.minor.mockImplementation(realSemver.default.minor);
+      mockOctokit.rest.repos.getRelease.mockResolvedValue({ data: release });
+      mockOctokit.rest.git.getRef.mockImplementation(async ({ ref }) => ({
+        data: { object: { sha: ref === 'tags/v2.1.2' ? 'annotated-tag-sha' : 'alias-tag-sha', type: 'tag' } }
+      }));
+      mockOctokit.rest.git.getTag.mockResolvedValue({ data: { object: { sha: 'release-commit', type: 'commit' } } });
+      mockOctokit.rest.git.getCommit.mockResolvedValue({ data: { parents: [{ sha: 'source-commit' }] } });
+      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
+        data: [
+          { number: 7, merged_at: '2026-01-01T00:00:00Z' },
+          { number: 8, merged_at: '2026-02-01T00:00:00Z' },
+          { number: 9, merged_at: null }
+        ]
       });
+      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Resource not accessible by integration'));
+      setComments([{ id: 1, user: { login: 'github-actions[bot]', type: 'Bot' }, body: draftBody }]);
+    });
+
+    const setComments = comments => {
+      mockOctokit.paginate.mockImplementation(async (method, options) => {
+        if (method === mockOctokit.rest.issues.listComments) return comments;
+        return (await method(options)).data;
+      });
+    };
+
+    const setInputs = overrides =>
+      mockCore.getInput.mockImplementation(
+        name =>
+          ({ github_token: 'test-token', mode: 'promote', draft_release_pr_reminder: 'true', ...overrides })[name] || ''
+      );
+
+    test('should check off the reminder on the latest merged PR for the release source commit', async () => {
+      setInputs();
 
       await run();
 
-      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith('Skipping PR comment update (draft_release_pr_reminder is disabled)');
+      expect(mockOctokit.rest.git.getCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'release-commit' })
+      );
+      expect(mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit).toHaveBeenCalledWith(
+        expect.objectContaining({ commit_sha: 'source-commit' })
+      );
+      expect(mockOctokit.paginate).toHaveBeenCalledWith(
+        mockOctokit.rest.issues.listComments,
+        expect.objectContaining({ issue_number: 8 })
+      );
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
+        expect.objectContaining({ comment_id: 1, body: buildPublishedReminderBody('v2.1.2', release.html_url) })
+      );
+      const { body } = mockOctokit.rest.issues.updateComment.mock.calls[0][0];
+      expect(body).toContain('- [x] Review the release notes');
+      expect(body).toContain('- [x] Publish the release to make it permanent');
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
     });
 
-    it('should warn and return on missing release payload', async () => {
-      mockGithubContext.payload = { action: 'published', release: {} };
+    test('should update legacy reminders without a marker', async () => {
+      setInputs();
+      setComments([{ id: 2, user: { login: 'github-actions[bot]', type: 'Bot' }, body: legacyBody }]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 2 }));
+    });
+
+    test('should not update comments by other authors or for other versions', async () => {
+      setInputs();
+      setComments([
+        { id: 3, user: { login: 'someone', type: 'User' }, body: draftBody },
+        { id: 4, user: { login: 'github-actions[bot]', type: 'Bot' }, body: legacyBody.replace('v2.1.2', 'v2.1.1') }
+      ]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    });
+
+    test('should not rewrite a reminder that is already published', async () => {
+      setInputs();
+      setComments([
+        {
+          id: 5,
+          user: { login: 'github-actions[bot]', type: 'Bot' },
+          body: buildPublishedReminderBody('v2.1.2', release.html_url)
+        }
+      ]);
+
+      await run();
+
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+    });
+
+    test('should skip the reminder update when draft_release_pr_reminder is not enabled', async () => {
+      setInputs({ draft_release_pr_reminder: '' });
+
+      await run();
+
+      expect(mockOctokit.rest.git.getCommit).not.toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
+    });
+
+    test('should warn without failing promotion when the update fails', async () => {
+      setInputs();
+      mockOctokit.rest.issues.updateComment.mockRejectedValue(new Error('Resource not accessible by integration'));
 
       await run();
 
       expect(mockCore.warning).toHaveBeenCalledWith(
-        'Release event missing expected payload data; cannot update PR comments.'
+        'Could not update draft release reminder for v2.1.2: Resource not accessible by integration'
       );
-      expect(mockOctokit.rest.git.getRef).not.toHaveBeenCalled();
-    });
-
-    it('should find and update a draft comment by version-specific marker', async () => {
-      const draftBody =
-        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: draftBody, user: { login: 'test-bot' } }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          comment_id: 100,
-          body: expect.stringContaining('## ✅ Release Published')
-        })
-      );
-      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: expect.stringContaining('https://github.com/test-owner/test-repo/releases/tag/v1.2.3')
-        })
-      );
-      expect(mockCore.info).toHaveBeenCalledWith('✅ Updated PR comment on PR #42');
-    });
-
-    it('should find and update a legacy comment without marker', async () => {
-      // Legacy comments don't have the HTML marker
-      const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 55, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 200, body: legacyBody, user: { login: 'test-bot' } }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          comment_id: 200,
-          body: expect.stringContaining('## ✅ Release Published')
-        })
-      );
-    });
-
-    it('should skip unmerged PRs', async () => {
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 10, merged_at: null }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
-    });
-
-    it('should skip comments from other users', async () => {
-      const draftBody =
-        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      // Comment is from a different user
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: draftBody, user: { login: 'other-user' } }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
-    });
-
-    it('should still match comments when auth fails (no author filter)', async () => {
-      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Auth failed'));
-
-      const draftBody =
-        '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: draftBody, user: { login: 'unknown-bot' } }]
-      });
-
-      await run();
-
-      // Should still update since marker match doesn't require author
-      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledWith(expect.objectContaining({ comment_id: 100 }));
-    });
-
-    it('should skip legacy fallback when auth fails (no author confirmation)', async () => {
-      mockOctokit.rest.users.getAuthenticated.mockRejectedValue(new Error('Auth failed'));
-
-      // Legacy comment has no marker — only heading + version
-      const legacyBody = '## 📦 Draft Release Created\n\nA draft release **v1.2.3** has been created.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: legacyBody, user: { login: 'unknown-bot' } }]
-      });
-
-      await run();
-
-      // Should NOT update — legacy fallback requires confirmed author
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
-    });
-
-    it('should skip if comment already shows published state (idempotency)', async () => {
-      const publishedBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## ✅ Release Published\n\nAlready done.';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: publishedBody, user: { login: 'test-bot' } }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('already shows published state'));
-    });
-
-    it('should log info when no matching comment is found', async () => {
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: 'Unrelated comment', user: { login: 'test-bot' } }]
-      });
-
-      await run();
-
-      expect(mockOctokit.rest.issues.updateComment).not.toHaveBeenCalled();
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('No PR comment found'));
-    });
-
-    it('should use predictable tag URL instead of draft URL', async () => {
-      const draftBody = '<!-- publish-github-action-draft:v1.2.3 -->\n## 📦 Draft Release Created';
-
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [{ number: 42, merged_at: '2024-01-01T00:00:00Z' }]
-      });
-      mockOctokit.rest.issues.listComments.mockResolvedValue({
-        data: [{ id: 100, body: draftBody, user: { login: 'test-bot' } }]
-      });
-
-      await run();
-
-      // The URL in the updated comment should be the predictable tag URL, not the untagged draft URL
-      const updateCall = mockOctokit.rest.issues.updateComment.mock.calls[0][0];
-      expect(updateCall.body).toContain('https://github.com/test-owner/test-repo/releases/tag/v1.2.3');
-      expect(updateCall.body).not.toContain('untagged-');
-    });
-
-    it('should warn on API error when resolving tag', async () => {
-      mockOctokit.rest.git.getRef.mockRejectedValue(new Error('API rate limit exceeded'));
-
-      await run();
-
-      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update PR comment'));
-    });
-
-    it('should continue to next PR when updateComment fails on one', async () => {
-      // Two merged PRs associated with the tag commit
-      mockOctokit.rest.repos.listPullRequestsAssociatedWithCommit.mockResolvedValue({
-        data: [
-          { number: 50, merged_at: '2024-01-01T00:00:00Z' },
-          { number: 51, merged_at: '2024-01-01T00:00:00Z' }
-        ]
-      });
-
-      const marker = `<!-- publish-github-action-draft:v1.2.3 -->`;
-      // PR #50 has the marker but updateComment will fail; PR #51 also has the marker
-      mockOctokit.rest.issues.listComments
-        .mockResolvedValueOnce({
-          data: [{ id: 600, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
-        })
-        .mockResolvedValueOnce({
-          data: [{ id: 601, body: `${marker}\n## 📦 Draft Release Created`, user: { login: 'test-bot' } }]
-        });
-
-      // First PR fails immediately (non-retryable, no retry attempts), second PR succeeds
-      mockOctokit.rest.issues.updateComment
-        .mockRejectedValueOnce(new Error('Resource not accessible by integration'))
-        .mockResolvedValueOnce({});
-
-      await run();
-
-      // Should warn about PR #50 but still update PR #51
-      expect(mockCore.warning).toHaveBeenCalledWith(expect.stringContaining('Could not update comment on PR #50'));
-      expect(mockOctokit.rest.issues.updateComment).toHaveBeenCalledTimes(2);
-      expect(mockCore.info).toHaveBeenCalledWith(expect.stringContaining('Updated PR comment on PR #51'));
+      expect(mockCore.setFailed).not.toHaveBeenCalled();
+      expect(mockCore.info).toHaveBeenCalledWith('✅ Action completed successfully!');
     });
   });
 });
